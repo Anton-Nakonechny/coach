@@ -10,6 +10,7 @@ import java.util.List;
  * @param anthropicApiKey  Anthropic API key (from {@code ANTHROPIC_API_KEY}); blank in tests.
  * @param maxTokens        non-streaming output cap (kept under SDK HTTP timeouts).
  * @param conversationsDir directory holding per-conversation JSONL files.
+ * @param coachesDir       root folder of coach scenario prompts (one subfolder per coach).
  * @param upload           file-attachment limits.
  */
 @ConfigurationProperties(prefix = "coach")
@@ -17,6 +18,7 @@ public record AppConfig(
         String anthropicApiKey,
         int maxTokens,
         String conversationsDir,
+        String coachesDir,
         Upload upload
 ) {
 

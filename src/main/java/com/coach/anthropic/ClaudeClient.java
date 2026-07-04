@@ -39,8 +39,9 @@ public class ClaudeClient {
      * @param modelKey one of the keys in {@link ModelsConfig}.
      * @param messages the conversation history (text + attachments) for the stateless API.
      * @param effort   effort level; ignored if the model doesn't support it.
+     * @param system   system prompt; null when the conversation has no coach.
      */
-    public String generate(ModelKey modelKey, List<ApiMessage> messages, String effort) {
+    public String generate(ModelKey modelKey, List<ApiMessage> messages, String effort, String system) {
         ModelInfo cfg = models.byKey(modelKey);
         if (cfg == null) {
             throw new IllegalArgumentException("Unknown model: " + modelKey);
@@ -57,7 +58,7 @@ public class ClaudeClient {
         }
 
         List<AnthropicBlock> blocks =
-                gateway.createMessage(cfg.id(), config.maxTokens(), messages, extraBody);
+                gateway.createMessage(cfg.id(), config.maxTokens(), system, messages, extraBody);
 
         return blocks.stream()
                 .filter(b -> AnthropicBlock.TYPE_TEXT.equals(b.type()) && b.text() != null)

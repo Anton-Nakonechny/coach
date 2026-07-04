@@ -37,6 +37,8 @@ coach:
   max-tokens: 16000
   # Where per-conversation JSONL files live. Overridden to a tmp dir in tests.
   conversations-dir: conversations
+  # Root folder of coach scenario prompts (one subfolder per coach). Overridden in tests.
+  coaches-dir: coaches
   # File-attachment limits (see AppConfig.Upload). Attachments are uploaded to the
   # Anthropic Files API; zips are expanded server-side into individual attachments.
   upload:

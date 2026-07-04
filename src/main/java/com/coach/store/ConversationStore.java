@@ -5,8 +5,10 @@ import com.coach.anthropic.AttachmentBlock;
 import com.coach.anthropic.ContentBlock;
 import com.coach.anthropic.SdkFileUploadGateway;
 import com.coach.anthropic.TextBlock;
+import com.coach.coach.CoachMeta;
 import com.coach.config.AppConfig;
 import static com.coach.anthropic.MimeType.fromValue;
+import com.coach.model.CoachType;
 import com.coach.model.ModelKey;
 import com.coach.web.dto.AttachmentMeta;
 import com.coach.web.dto.ConversationItem;
@@ -32,6 +34,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Stream;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
@@ -68,6 +71,11 @@ public class ConversationStore {
         // Guard against path traversal — ids are server-minted hex, but be safe.
         String safe = Path.of(conversationId).getFileName().toString();
         return convDir.resolve(safe + ".jsonl");
+    }
+
+    private Path metaPath(String conversationId) {
+        String safe = Path.of(conversationId).getFileName().toString();
+        return convDir.resolve(safe + ".meta.json");
     }
 
     private Path archiveDir() {
@@ -111,6 +119,35 @@ public class ConversationStore {
         }
     }
 
+    /** Persist the coach selection for a conversation as a {@code <id>.meta.json} sidecar. */
+    public void saveCoachMeta(String conversationId, CoachMeta meta) {
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("coachType", meta.coachType().value());
+        if (meta.promptFile() != null) record.put("promptFile", meta.promptFile());
+        if (meta.topic() != null) record.put("topic", meta.topic());
+        try {
+            Files.createDirectories(convDir);
+            Files.writeString(metaPath(conversationId), mapper.writeValueAsString(record), UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /** The coach selection stored for a conversation; empty for plain (coach-less) chats. */
+    public Optional<CoachMeta> coachMeta(String conversationId) {
+        Path file = metaPath(conversationId);
+        if (!Files.exists(file)) return Optional.empty();
+        try {
+            JsonNode node = mapper.readTree(Files.readString(file, UTF_8));
+            return Optional.of(new CoachMeta(
+                    CoachType.fromValue(text(node, "coachType")),
+                    text(node, "promptFile"),
+                    text(node, "topic")));
+        } catch (IOException | IllegalArgumentException e) {
+            return Optional.empty();
+        }
+    }
+
     /** Full stored records for a conversation (empty if none). */
     public List<MessageItem> loadMessages(String conversationId) {
         Path file = path(conversationId);
@@ -130,7 +167,8 @@ public class ConversationStore {
                         text(node, "content"),
                         modelStr != null ? ModelKey.fromValue(modelStr) : null,
                         text(node, "effort"),
-                        attachments(node.get("attachments"))));
+                        attachments(node.get("attachments")),
+                        null));
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -216,12 +254,22 @@ public class ConversationStore {
             }
             for (Path file : files) {
                 String id = file.getFileName().toString().replaceFirst("\\.jsonl$", "");
-                String firstUser = firstUserContent(file);
-                if (firstUser == null) continue;
-                String preview = firstUser.isEmpty() ? "(empty)"
-                        : firstUser.length() > 60 ? firstUser.substring(0, 60) + "…"
-                        : firstUser;
-                entries.add(new Entry(new ConversationItem(id, preview),
+                // Coach conversations are labeled by their scenario, not the first message
+                // (which is the same synthetic instruction in every coach chat).
+                Optional<CoachMeta> meta = coachMeta(id);
+                String preview;
+                if (meta.isPresent()) {
+                    preview = meta.get().preview();
+                } else {
+                    String firstUser = firstUserContent(file);
+                    if (firstUser == null) continue;
+                    preview = firstUser.isEmpty() ? "(empty)"
+                            : firstUser.length() > 60 ? firstUser.substring(0, 60) + "…"
+                            : firstUser;
+                }
+                entries.add(new Entry(
+                        new ConversationItem(id, preview,
+                                meta.map(m -> m.coachType().value()).orElse(null)),
                         Files.getLastModifiedTime(file).toMillis()));
             }
         } catch (IOException e) {
@@ -270,6 +318,7 @@ public class ConversationStore {
                 in.transferTo(gz);
             }
             Files.delete(file);
+            Files.deleteIfExists(metaPath(conversationId));
             return true;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -308,6 +357,7 @@ public class ConversationStore {
                 String id = file.getFileName().toString().replaceFirst("\\.jsonl$", "");
                 deleteUploads(id);
                 Files.delete(file);
+                Files.deleteIfExists(metaPath(id));
             }
             return files.size();
         } catch (IOException e) {

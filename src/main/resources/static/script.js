@@ -8,11 +8,17 @@ let currentEffort = null;
 let models = [];
 let effortLevels = [];
 let pendingAttachments = []; // [{id, file, kind, objectUrl?}]
+let conversationCoach = {};  // conversationId -> coachType slug ('none' for plain chats)
+let spanishSetup = false;
+let selectedTopic = null;
+let spanishTopics = null;
+
+const SPANISH_WELCOME = 'Nuevo chat. Elige un modelo a la izquierda y un tema abajo, e introduce una lista de palabras para practicar.';
 
 // DOM elements
 let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
     conversationList, clearAllButton, attachButton, fileInput, attachmentStrip,
-    composerError, dropOverlay;
+    composerError, dropOverlay, coachNote;
 
 document.addEventListener('DOMContentLoaded', async () => {
     chatMessages    = document.getElementById('chatMessages');
@@ -28,6 +34,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     attachmentStrip = document.getElementById('attachmentStrip');
     composerError   = document.getElementById('composerError');
     dropOverlay     = document.getElementById('dropOverlay');
+    coachNote       = document.getElementById('coachNote');
 
     setupEventListeners();
     setupDragAndDrop();
@@ -55,6 +62,110 @@ function setupEventListeners() {
     clearAllButton.addEventListener('click', clearAllConversations);
     attachButton.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+    document.querySelectorAll('input[name="coach"]').forEach(radio =>
+        radio.addEventListener('change', () => onCoachSelected(radio.value)));
+}
+
+// ── Coach panel ──────────────────────────────────────────────
+
+// The radio group mirrors the open conversation's coach: selecting a coach creates a
+// fresh coach chat and stays there; opening a conversation from history sets the radio
+// to its stored coach (a programmatic check fires no change event, so this never loops).
+function setCoachRadio(value) {
+    const radio = document.querySelector(`input[name="coach"][value="${value}"]`)
+        || document.querySelector('input[name="coach"][value="none"]');
+    radio.checked = true;
+}
+
+function setCoachRadiosDisabled(disabled) {
+    document.querySelectorAll('input[name="coach"]').forEach(r => { r.disabled = disabled; });
+}
+
+async function onCoachSelected(value) {
+    coachNote.textContent = '';
+    spanishSetup = false;
+    selectedTopic = null;
+    if (value === 'none') {
+        startNewChat();
+        return;
+    }
+    if (value === 'spanish') {
+        enterSpanishSetup();
+        return;
+    }
+
+    setCoachRadiosDisabled(true);
+    chatMessages.innerHTML = '';
+    const loadingMessage = createLoadingMessage();
+    chatMessages.appendChild(loadingMessage);
+
+    try {
+        const response = await fetch(`${API_URL}/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: '',
+                coachType: value,
+                model: currentModel,
+                effort: currentEffort,
+            }),
+        });
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.message || 'Failed to start coach chat');
+        }
+        const data = await response.json();
+        // Refresh the sidebar first so the coach map knows the new conversation,
+        // then open it (which also keeps the radio on the chosen coach).
+        await loadConversations();
+        await openConversation(data.conversationId);
+    } catch (error) {
+        startNewChat();
+        coachNote.textContent = error.message;
+    } finally {
+        setCoachRadiosDisabled(false);
+    }
+}
+
+async function enterSpanishSetup() {
+    currentConversationId = null;
+    chatMessages.innerHTML = '';
+    highlightActiveConversation();
+    coachNote.textContent = '';
+    addMessage(SPANISH_WELCOME, 'assistant');
+    spanishSetup = true;
+
+    if (!spanishTopics) {
+        try {
+            const resp = await fetch(`${API_URL}/coaches/spanish/topics`);
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.message || 'Failed to load topics');
+            spanishTopics = data;
+        } catch (e) {
+            coachNote.textContent = e.message;
+            startNewChat();
+            return;
+        }
+    }
+    renderTopicGrid();
+}
+
+function renderTopicGrid() {
+    const grid = document.createElement('div');
+    grid.className = 'topic-grid';
+    grid.id = 'topicGrid';
+    spanishTopics.forEach(t => {
+        const btn = document.createElement('button');
+        btn.className = 'topic-button';
+        btn.dataset.topic = t;
+        btn.textContent = t;
+        btn.addEventListener('click', () => {
+            selectedTopic = t;
+            setActive('.topic-button', 'topic', t);
+        });
+        grid.appendChild(btn);
+    });
+    chatMessages.appendChild(grid);
 }
 
 // ── Attachment validation & state ────────────────────────────
@@ -297,6 +408,10 @@ function autoResize() {
 async function sendMessage() {
     const message = chatInput.value.trim();
     if (!message && pendingAttachments.length === 0) return;
+    if (spanishSetup && !selectedTopic) {
+        composerError.textContent = 'Elige un tema primero';
+        return;
+    }
 
     // Snapshot & clear before anything async
     const attachmentsSnapshot = [...pendingAttachments];
@@ -310,6 +425,7 @@ async function sendMessage() {
     sendButton.disabled = true;
     attachButton.disabled = true;
 
+    const isSpanishFirst = spanishSetup;
     addMessage(message, 'user', attachmentsSnapshot);
 
     const loadingMessage = createLoadingMessage();
@@ -322,6 +438,7 @@ async function sendMessage() {
             model: currentModel,
             effort: currentEffort,
             conversationId: currentConversationId,
+            ...(spanishSetup && { coachType: 'spanish', topic: selectedTopic }),
         });
         let response;
         if (attachmentsSnapshot.length > 0) {
@@ -346,13 +463,19 @@ async function sendMessage() {
         }
 
         const data = await response.json();
-        const isNew = !currentConversationId;
-        currentConversationId = data.conversationId;
-
         loadingMessage.remove();
-        addMessage(data.answer, 'assistant');
 
-        if (isNew) loadConversations();
+        if (isSpanishFirst) {
+            spanishSetup = false;
+            selectedTopic = null;
+            await loadConversations();
+            await openConversation(data.conversationId);
+        } else {
+            const isNew = !currentConversationId;
+            currentConversationId = data.conversationId;
+            addMessage(data.answer, 'assistant', null, data.sentences);
+            if (isNew) loadConversations();
+        }
     } catch (error) {
         loadingMessage.remove();
         addMessage(`Error: ${error.message}`, 'assistant');
@@ -380,7 +503,7 @@ function createLoadingMessage() {
 
 // attachments is optional; entries are either pending shape {file, kind, objectUrl}
 // or history shape {fileId, filename, mediaType, kind}.
-function addMessage(content, type, attachments) {
+function addMessage(content, type, attachments, sentences) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${type}`;
 
@@ -420,7 +543,9 @@ function addMessage(content, type, attachments) {
     }
 
     if (content) {
-        if (type === 'assistant') {
+        if (type === 'assistant' && sentences && sentences.length) {
+            contentDiv.appendChild(buildSentenceCards(sentences));
+        } else if (type === 'assistant') {
             const html = document.createElement('div');
             html.innerHTML = marked.parse(content);
             contentDiv.appendChild(html);
@@ -436,13 +561,48 @@ function addMessage(content, type, attachments) {
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
+function buildSentenceCards(sentences) {
+    const container = document.createElement('div');
+    container.className = 'sentence-cards';
+    sentences.forEach(({ hint, sentence }) => {
+        const card = document.createElement('div');
+        card.className = 'sentence-card';
+        card.dataset.sentence = sentence;
+
+        const text = document.createElement('span');
+        text.className = 'sentence-text';
+        text.textContent = sentence;
+
+        const hintIcon = document.createElement('span');
+        hintIcon.className = 'hint-icon';
+        hintIcon.setAttribute('data-hint', hint);
+        hintIcon.textContent = '?';
+
+        card.appendChild(text);
+        card.appendChild(hintIcon);
+        container.appendChild(card);
+    });
+    container.addEventListener('click', e => {
+        const card = e.target.closest('.sentence-card');
+        if (!card) return;
+        chatInput.value += '\n' + card.dataset.sentence + '\n';
+        autoResize();
+        chatInput.focus();
+    });
+    return container;
+}
+
 // ── Conversations ─────────────────────────────────────────────
 
 function startNewChat() {
+    spanishSetup = false;
+    selectedTopic = null;
     currentConversationId = null;
     chatMessages.innerHTML = '';
     addMessage("New chat. Pick a model on the left and ask me anything.", 'assistant');
     highlightActiveConversation();
+    setCoachRadio('none');
+    coachNote.textContent = '';
     chatInput.focus();
 }
 
@@ -456,12 +616,16 @@ async function loadConversations() {
             conversationList.innerHTML = '<span class="muted">No conversations yet</span>';
             return;
         }
+        conversationCoach = {};
         items.forEach(item => {
+            conversationCoach[item.conversationId] = item.coachType || 'none';
+
             const row = document.createElement('div');
             row.className = 'conversation-row';
 
             const btn = document.createElement('button');
             btn.className = 'conversation-item';
+            if (item.coachType) btn.classList.add('coach-chat');
             btn.textContent = item.preview;
             btn.dataset.id = item.conversationId;
             btn.addEventListener('click', () => openConversation(item.conversationId));
@@ -519,10 +683,12 @@ async function openConversation(conversationId) {
         const messages = await response.json();
         currentConversationId = conversationId;
         chatMessages.innerHTML = '';
-        messages.forEach(m => addMessage(m.content, m.role, m.attachments));
+        messages.forEach(m => addMessage(m.content, m.role, m.attachments, m.sentences));
         highlightActiveConversation();
+        setCoachRadio(conversationCoach[conversationId] || 'none');
     } catch (e) {
         console.error(e);
+        coachNote.textContent = 'Failed to load conversation — refresh or click it in the sidebar.';
     }
 }
 
