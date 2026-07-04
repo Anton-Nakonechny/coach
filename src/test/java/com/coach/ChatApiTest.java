@@ -72,10 +72,12 @@ import static org.mockito.Mockito.doThrow;
 class ChatApiTest {
 
     static final Path CONV_DIR;
+    static final Path COACHES_DIR;
 
     static {
         try {
             CONV_DIR = Files.createTempDirectory("coach-test-conv");
+            COACHES_DIR = Files.createTempDirectory("coach-test-coaches");
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -84,6 +86,7 @@ class ChatApiTest {
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("coach.conversations-dir", CONV_DIR::toString);
+        registry.add("coach.coaches-dir", COACHES_DIR::toString);
         // Small caps so limits can be exercised with tiny inputs (allowed-mime-types
         // stays as configured in application.yml).
         registry.add("coach.upload.max-file-size-bytes", () -> 1024);
@@ -118,12 +121,12 @@ class ChatApiTest {
     void setUp() throws IOException {
         doAnswer(inv -> {
             gatewayCalls.add(new GatewayCall(
-                inv.getArgument(0), inv.getArgument(1), List.copyOf(inv.getArgument(2)),
-                Map.copyOf(inv.getArgument(3))));
+                inv.getArgument(0), inv.getArgument(1), inv.getArgument(2),
+                List.copyOf(inv.getArgument(3)), Map.copyOf(inv.getArgument(4))));
             return pendingResponses.isEmpty()
                 ? List.of(new AnthropicBlock("text", "(no scripted response)"))
                 : pendingResponses.poll();
-        }).when(gateway).createMessage(any(), anyInt(), any(), any());
+        }).when(gateway).createMessage(any(), anyInt(), any(), any(), any());
         doAnswer(inv -> {
             String fn = inv.getArgument(0);
             String mt = inv.getArgument(1);
@@ -133,18 +136,22 @@ class ChatApiTest {
         }).when(fileUploadGateway).upload(any(), any(), any());
         doAnswer(inv -> { deleted.add(inv.getArgument(0, String.class)); return null; })
                 .when(fileUploadGateway).delete(any());
-        if (Files.exists(CONV_DIR)) {
-            try (var paths = Files.walk(CONV_DIR)) {
-                paths.sorted((a, b) -> b.compareTo(a))
-                        .filter(p -> !p.equals(CONV_DIR))
-                        .forEach(p -> {
-                            try {
-                                Files.delete(p);
-                            } catch (IOException e) {
-                                throw new RuntimeException(e);
-                            }
-                        });
-            }
+        wipeDirectory(CONV_DIR);
+        wipeDirectory(COACHES_DIR);
+    }
+
+    private static void wipeDirectory(Path dir) throws IOException {
+        if (!Files.exists(dir)) return;
+        try (var paths = Files.walk(dir)) {
+            paths.sorted((a, b) -> b.compareTo(a))
+                    .filter(p -> !p.equals(dir))
+                    .forEach(p -> {
+                        try {
+                            Files.delete(p);
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
         }
     }
 
@@ -163,7 +170,8 @@ class ChatApiTest {
     /** A file part for a multipart chat request. */
     record PartFile(String filename, String contentType, byte[] bytes) { }
 
-    record GatewayCall(String modelId, int maxTokens, List<ApiMessage> messages, Map<String, Object> extraBody) {}
+    record GatewayCall(String modelId, int maxTokens, String system, List<ApiMessage> messages,
+                       Map<String, Object> extraBody) {}
 
     record FakeUpload(String filename, String mediaType, int byteLength) {}
 
@@ -792,7 +800,7 @@ class ChatApiTest {
 
     @Test
     void upstreamErrorPropagatesAs500() {
-        doThrow(new RuntimeException("upstream boom")).when(gateway).createMessage(any(), anyInt(), any(), any());
+        doThrow(new RuntimeException("upstream boom")).when(gateway).createMessage(any(), anyInt(), any(), any(), any());
 
         ResponseEntity<String> resp = postChat(chatBody("hi", "opus-4-8", null, null));
 
@@ -802,7 +810,7 @@ class ChatApiTest {
 
     @Test
     void anthropicTimeoutPropagatesAs500() {
-        doThrow(new RuntimeException("Request timed out")).when(gateway).createMessage(any(), anyInt(), any(), any());
+        doThrow(new RuntimeException("Request timed out")).when(gateway).createMessage(any(), anyInt(), any(), any(), any());
 
         ResponseEntity<String> resp = postChat(chatBody("hi", "opus-4-8", null, null));
 
@@ -971,6 +979,515 @@ class ChatApiTest {
         assertThat(json(resp).get("count").asInt()).isEqualTo(0);
     }
 
+    // ----------------------------------------------------------------------- //
+    // Coach sessions
+    // ----------------------------------------------------------------------- //
+
+    static final String OPENING_INSTRUCTION = "Розпочни співбесіду — постав лише перше запитання.";
+
+    private static Path cooDir() {
+        return COACHES_DIR.resolve("Chief Operating Officer");
+    }
+
+    private static void writeCooPrompt(String name, String content) throws IOException {
+        Files.createDirectories(cooDir());
+        Files.writeString(cooDir().resolve(name), content);
+    }
+
+    /** A new-chat body with a coach selected — blank message, no conversationId. */
+    private static Map<String, Object> coachBody(String coachType) {
+        Map<String, Object> body = chatBody("", "opus-4-8", null, null);
+        body.put("coachType", coachType);
+        return body;
+    }
+
+    private static Path spanishDir() {
+        return COACHES_DIR.resolve("Spanish");
+    }
+
+    private static void writeSpanishTopics(String... topics) throws IOException {
+        var dir = spanishDir();
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("temas.txt"), String.join("\n", topics), UTF_8);
+    }
+
+    /** New-Spanish-chat body; topic omitted when null. */
+    private static Map<String, Object> spanishBody(String topic, String words) {
+        Map<String, Object> body = chatBody(words != null ? words : "", "sonnet-4-6", null, null);
+        body.put("coachType", "spanish");
+        if (topic != null) body.put("topic", topic);
+        return body;
+    }
+
+    @Test
+    void spanishTopicsEndpointReturnsTopicsInFileOrder() throws IOException {
+        writeSpanishTopics("Ser y estar", "", "  Por y para  ");
+
+        ResponseEntity<String> resp = rest.getForEntity(url("/api/coaches/spanish/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = json(resp);
+        assertThat(body.isArray()).isTrue();
+        assertThat(body).hasSize(2);
+        assertThat(body.get(0).asText()).isEqualTo("Ser y estar");
+        assertThat(body.get(1).asText()).isEqualTo("Por y para");
+    }
+
+    @Test
+    void spanishTopicsEndpointWithMissingFileReturns500() {
+        // No temas.txt written — spanishDir may not even exist.
+        ResponseEntity<String> resp = rest.getForEntity(url("/api/coaches/spanish/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).contains("topics");
+    }
+
+    // ── Commit 2: Spanish chat with topic and composed practice prompt ─────── //
+
+    @Test
+    void spanishChatComposesPracticePromptFromTopicAndWords() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("(caber) Only this matches.");
+
+        var resp = postChat(spanishBody("Ser y estar", "caber, cavar pala"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        String cid = json(resp).get("conversationId").asText();
+
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("tutor de español").contains("entre paréntesis").contains("Ser y estar");
+        assertThat(roles(call)).containsExactly("user");
+        String userText = textOf(call.messages().get(0));
+        assertThat(userText).contains("Quiero practicar «Ser y estar»");
+        assertThat(userText).contains("caber, cavar pala");
+        assertThat(userText).contains("Escríbeme 3 oraciones");
+
+        JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+        String persisted = messages.get(0).get("content").asText();
+        assertThat(persisted).contains("Quiero practicar «Ser y estar»");
+        assertThat(persisted).contains("caber, cavar pala");
+        assertThat(persisted).contains("Escríbeme 3 oraciones");
+    }
+
+    @Test
+    void spanishChatWithAttachmentOnlyReferencesAttachedFile() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("(caber) Only this matches.");
+
+        var req = spanishBody("Ser y estar", null);
+        var resp = postChatMultipart(req, List.of(
+                new PartFile("words.txt", "text/plain", "caber\ncavar".getBytes(UTF_8))));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        String userText = textOf(call.messages().get(0));
+        assertThat(userText).contains("las palabras del archivo adjunto");
+        assertThat(userText).contains("una oración en inglés por cada palabra");
+        assertThat(call.messages().get(0).content()).hasSize(2); // TextBlock + AttachmentBlock
+    }
+
+    @Test
+    void spanishChatWithWordsAndAttachmentPrefersTypedWords() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("(caber) Only this matches.");
+
+        var req = spanishBody("Ser y estar", "caber");
+        var resp = postChatMultipart(req, List.of(
+                new PartFile("words.txt", "text/plain", "other\nwords".getBytes(UTF_8))));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        String userText = textOf(call.messages().get(0));
+        assertThat(userText).contains("las siguientes palabras: caber");
+        assertThat(userText).contains("Escríbeme 1 oración");
+        assertThat(call.messages().get(0).content()).hasSize(2); // attachment still sent
+    }
+
+    @Test
+    void spanishChatPersistsTopicMetaSidecar() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("(caber) Only this matches.");
+
+        String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
+
+        JsonNode meta = mapper.readTree(Files.readString(CONV_DIR.resolve(cid + ".meta.json")));
+        assertThat(meta.get("coachType").asText()).isEqualTo("spanish");
+        assertThat(meta.get("topic").asText()).isEqualTo("Ser y estar");
+        assertThat(meta.has("promptFile")).isFalse();
+    }
+
+    @Test
+    void spanishConversationListItemShowsTopicPreview() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("(caber) Only this matches.");
+
+        postChat(spanishBody("Ser y estar", "caber"));
+
+        JsonNode items = json(rest.getForEntity(url("/api/conversations"), String.class));
+        assertThat(items.get(0).get("preview").asText()).isEqualTo("Español · Ser y estar");
+        assertThat(items.get(0).get("coachType").asText()).isEqualTo("spanish");
+    }
+
+    @Test
+    void spanishFollowUpIsPassthroughWithPersonaSystemPrompt() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("(caber) Only this matches.");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
+
+        queueText("Muy bien.");
+        Map<String, Object> followUp = chatBody("Mi traducción.", "sonnet-4-6", null, cid);
+        postChat(followUp);
+
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("tutor de español");
+        assertThat(roles(call)).containsExactly("user", "assistant", "user");
+        assertThat(textOf(call.messages().get(2))).isEqualTo("Mi traducción.");
+    }
+
+    @Test
+    void spanishChatWithoutTopicReturns400() throws IOException {
+        writeSpanishTopics("Ser y estar");
+
+        var body = spanishBody(null, "caber");
+        var resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("topic");
+        try (var paths = Files.list(CONV_DIR)) {
+            assertThat(paths.toList()).isEmpty();
+        }
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void spanishChatWithUnknownTopicReturns400() throws IOException {
+        writeSpanishTopics("Ser y estar");
+
+        var resp = postChat(spanishBody("No existe", "caber"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("No existe");
+        try (var paths = Files.list(CONV_DIR)) {
+            assertThat(paths.toList()).isEmpty();
+        }
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void spanishChatWithBlankMessageAndNoFilesReturns400() throws IOException {
+        writeSpanishTopics("Ser y estar");
+
+        var resp = postChat(spanishBody("Ser y estar", null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        try (var paths = Files.list(CONV_DIR)) {
+            assertThat(paths.toList()).isEmpty();
+        }
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void spanishChatOnExistingConversationReturns400() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("ok");
+        String cid = json(postChat(chatBody("hello", "sonnet-4-6", null, null))).get("conversationId").asText();
+
+        var body = spanishBody("Ser y estar", "caber");
+        body.put("conversationId", cid);
+        var resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("new chat");
+    }
+
+    @Test
+    void topicOnNonSpanishChatReturns400() throws IOException {
+        var plain = chatBody("hello", "sonnet-4-6", null, null);
+        plain.put("topic", "Ser y estar");
+        assertThat(postChat(plain).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+
+        writeSpanishTopics("Ser y estar");
+        writeCooPrompt("01-prd.md", "SCENARIO");
+        var coo = coachBody("chief-operating-officer");
+        coo.put("topic", "Ser y estar");
+        assertThat(postChat(coo).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void spanishChatWithMissingTopicsFileReturns500() {
+        var resp = postChat(spanishBody("Ser y estar", "caber"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    // ── Commit 3: Parse Spanish tutor sentence lists ───────────────────────── //
+
+    @Test
+    void spanishChatResponseParsesSentencesFromAssistantReply() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        // blank line between, caber repeated, multi-word hint
+        String reply = "(caber) I'm surprised that the shovel hasn't fit in the car.\n"
+                + "\n"
+                + "(caber) He doubted that it would fit.\n"
+                + "(cavar, pala) It's a shame that they haven't finished digging the hole yet.";
+        queueText(reply);
+
+        JsonNode resp = json(postChat(spanishBody("Ser y estar", "caber, caber, cavar")));
+
+        assertThat(resp.get("sentences").isArray()).isTrue();
+        assertThat(resp.get("sentences")).hasSize(3);
+        assertThat(resp.get("sentences").get(0).get("hint").asText()).isEqualTo("caber");
+        assertThat(resp.get("sentences").get(0).get("sentence").asText())
+                .isEqualTo("I'm surprised that the shovel hasn't fit in the car.");
+        assertThat(resp.get("sentences").get(1).get("hint").asText()).isEqualTo("caber");
+        assertThat(resp.get("sentences").get(2).get("hint").asText()).isEqualTo("cavar, pala");
+        assertThat(resp.get("sentences").get(2).get("sentence").asText())
+                .isEqualTo("It's a shame that they haven't finished digging the hole yet.");
+    }
+
+    @Test
+    void spanishFollowUpResponseParsesSentencesToo() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("(caber) First sentence.");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
+
+        queueText("(volver) She has become nervous.");
+        JsonNode resp = json(postChat(chatBody("Mi traducción.", "sonnet-4-6", null, cid)));
+
+        assertThat(resp.get("sentences")).isNotNull();
+        assertThat(resp.get("sentences")).hasSize(1);
+        assertThat(resp.get("sentences").get(0).get("hint").asText()).isEqualTo("volver");
+    }
+
+    @Test
+    void spanishMixedContentReplyHasNullSentences() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("¡Muy bien!\n(caber) Only this matches.");
+
+        JsonNode resp = json(postChat(spanishBody("Ser y estar", "caber")));
+
+        assertThat(resp.get("sentences").isNull()).isTrue();
+    }
+
+    @Test
+    void plainChatResponseHasNullSentencesEvenWhenReplyMatchesFormat() {
+        queueText("(caber) I'm surprised that the shovel hasn't fit in the car.");
+
+        JsonNode resp = json(postChat(chatBody("hello", "sonnet-4-6", null, null)));
+
+        assertThat(resp.get("sentences").isNull()).isTrue();
+    }
+
+    @Test
+    void getSpanishConversationDerivesSentencesForAssistantMessages() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        String reply = "(caber) I'm surprised.\n(pala) It's a shame.";
+        queueText(reply);
+        String cid = json(postChat(spanishBody("Ser y estar", "caber, pala"))).get("conversationId").asText();
+
+        JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+
+        // user message: no sentences
+        assertThat(messages.get(0).get("sentences").isNull()).isTrue();
+        // assistant message: parsed
+        assertThat(messages.get(1).get("sentences").isArray()).isTrue();
+        assertThat(messages.get(1).get("sentences")).hasSize(2);
+
+        // raw JSONL must not contain "sentences" key
+        String jsonl = Files.readString(CONV_DIR.resolve(cid + ".jsonl"));
+        assertThat(jsonl).doesNotContain("\"sentences\"");
+    }
+
+    @Test
+    void getCooConversationHasNullSentences() throws IOException {
+        writeCooPrompt("01-prd.md", "SCENARIO");
+        String reply = "(caber) I'm surprised that the shovel hasn't fit in the car.";
+        queueText(reply);
+        String cid = json(postChat(coachBody("chief-operating-officer"))).get("conversationId").asText();
+
+        JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+
+        messages.forEach(m -> assertThat(m.get("sentences").isNull()).isTrue());
+    }
+
+    @Test
+    void unknownCoachTypeReturns400() {
+        ResponseEntity<String> resp = postChat(coachBody("guru-9000"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("guru-9000");
+    }
+
+    @Test
+    void coachChatCreatesConversationWithScenarioSystemPromptAndSyntheticUserTurn() throws IOException {
+        writeCooPrompt("00-README.md", "docs only");
+        writeCooPrompt("01-prd.md", "SCENARIO BODY");
+        queueText("What is your first move?");
+
+        ResponseEntity<String> resp = postChat(coachBody("chief-operating-officer"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = json(resp);
+        String cid = body.get("conversationId").asText();
+        assertThat(cid).isNotBlank();
+        assertThat(body.get("answer").asText()).isEqualTo("What is your first move?");
+
+        // Claude got persona + whole scenario file as system, and only the synthetic turn.
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("Chief Operating Officer").contains("SCENARIO BODY");
+        assertThat(roles(call)).containsExactly("user");
+        assertThat(textOf(call.messages().get(0))).isEqualTo(OPENING_INSTRUCTION);
+
+        // Persisted and rehydrated as a normal visible user message.
+        assertThat(Files.readAllLines(CONV_DIR.resolve(cid + ".jsonl"))).hasSize(2);
+        JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+        assertThat(messages.get(0).get("role").asText()).isEqualTo("user");
+        assertThat(messages.get(0).get("content").asText()).isEqualTo(OPENING_INSTRUCTION);
+    }
+
+    @Test
+    void cooSystemPromptEnforcesUkrainianAndBansStageDirections() throws IOException {
+        writeCooPrompt("01-prd.md", "SCENARIO BODY");
+        queueText("Перше запитання?");
+
+        postChat(coachBody("chief-operating-officer"));
+
+        // The language and style rules are part of the gateway contract on every call.
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("Ukrainian").contains("stage directions");
+    }
+
+    @Test
+    void normalChatSendsNoSystemPrompt() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "opus-4-8", null, null));
+
+        assertThat(gatewayCalls.get(gatewayCalls.size() - 1).system()).isNull();
+    }
+
+    @Test
+    void coachChatPersistsCoachMetaSidecar() throws IOException {
+        writeCooPrompt("01-prd.md", "SCENARIO BODY");
+        queueText("opening question");
+
+        String cid = json(postChat(coachBody("chief-operating-officer")))
+                .get("conversationId").asText();
+
+        JsonNode meta = mapper.readTree(Files.readString(CONV_DIR.resolve(cid + ".meta.json")));
+        assertThat(meta.get("coachType").asText()).isEqualTo("chief-operating-officer");
+        assertThat(meta.get("promptFile").asText()).isEqualTo("01-prd.md");
+    }
+
+    @Test
+    void coachFollowUpReusesStoredScenarioWithoutReselection() throws IOException {
+        writeCooPrompt("01-prd.md", "SCENARIO BODY");
+        queueText("opening question");
+        queueText("follow-up answer");
+        String cid = json(postChat(coachBody("chief-operating-officer")))
+                .get("conversationId").asText();
+        // A new scenario appearing later must not be picked up by follow-up turns.
+        writeCooPrompt("99-other.md", "OTHER BODY");
+
+        postChat(chatBody("here is my PRD", "opus-4-8", null, cid));
+
+        GatewayCall secondCall = gatewayCalls.get(1);
+        assertThat(secondCall.system()).contains("SCENARIO BODY").doesNotContain("OTHER BODY");
+        assertThat(roles(secondCall)).containsExactly("user", "assistant", "user");
+    }
+
+    @Test
+    void coachScenarioSelectionSkipsReadmeAndNonMarkdown() throws IOException {
+        writeCooPrompt("00-README.md", "docs");
+        writeCooPrompt("notes.txt", "not a scenario");
+        writeCooPrompt(".hidden.md", "junk");
+        writeCooPrompt("02-org.md", "ORG SCENARIO");
+        queueText("opening question");
+
+        String cid = json(postChat(coachBody("chief-operating-officer")))
+                .get("conversationId").asText();
+
+        JsonNode meta = mapper.readTree(Files.readString(CONV_DIR.resolve(cid + ".meta.json")));
+        assertThat(meta.get("promptFile").asText()).isEqualTo("02-org.md");
+    }
+
+    @Test
+    void coachChatWithNoEligibleScenarioReturns500() throws IOException {
+        writeCooPrompt("00-README.md", "docs only");
+
+        ResponseEntity<String> resp = postChat(coachBody("chief-operating-officer"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void coachTypeOnExistingConversationReturns400() {
+        queueText("a1");
+        String cid = json(postChat(chatBody("q1", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+
+        Map<String, Object> body = coachBody("chief-operating-officer");
+        body.put("conversationId", cid);
+        ResponseEntity<String> resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("new chat");
+        assertThat(store.loadMessages(cid)).hasSize(2);
+    }
+
+    @Test
+    void coachInitWithNonBlankMessageReturns400() {
+        Map<String, Object> body = coachBody("chief-operating-officer");
+        body.put("message", "hi");
+
+        ResponseEntity<String> resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void coachConversationListItemShowsScenarioNameAndCoachType() throws IOException {
+        writeCooPrompt("03-kpi-okr.md", "SCENARIO BODY");
+        queueText("opening question");
+        String cid = json(postChat(coachBody("chief-operating-officer")))
+                .get("conversationId").asText();
+
+        JsonNode items = json(rest.getForEntity(url("/api/conversations"), String.class));
+
+        assertThat(items).hasSize(1);
+        assertThat(items.get(0).get("conversationId").asText()).isEqualTo(cid);
+        assertThat(items.get(0).get("preview").asText()).isEqualTo("COO · kpi okr");
+        assertThat(items.get(0).get("coachType").asText()).isEqualTo("chief-operating-officer");
+    }
+
+    @Test
+    void plainConversationListItemHasNullCoachType() {
+        queueText("ok");
+        postChat(chatBody("plain question", "opus-4-8", null, null));
+
+        JsonNode items = json(rest.getForEntity(url("/api/conversations"), String.class));
+
+        assertThat(items.get(0).get("preview").asText()).isEqualTo("plain question");
+        assertThat(items.get(0).get("coachType").isNull()).isTrue();
+    }
+
+    @Test
+    void archivingCoachConversationRemovesMetaSidecar() throws IOException {
+        writeCooPrompt("01-prd.md", "SCENARIO BODY");
+        queueText("opening question");
+        String cid = json(postChat(coachBody("chief-operating-officer")))
+                .get("conversationId").asText();
+        assertThat(Files.exists(CONV_DIR.resolve(cid + ".meta.json"))).isTrue();
+
+        rest.exchange(url("/api/conversations/" + cid), HttpMethod.DELETE, null, String.class);
+
+        assertThat(Files.exists(CONV_DIR.resolve(cid + ".meta.json"))).isFalse();
+        assertThat(Files.exists(CONV_DIR.resolve("archive").resolve(cid + ".jsonl.gz"))).isTrue();
+    }
+
     @Test
     void getFavicon_whenChatPageLoads_servesYellowBrainSvgIcon() {
         var html = rest.getForEntity(url("/"), String.class);
@@ -981,5 +1498,47 @@ class ChatApiTest {
         assertThat(icon.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(icon.getHeaders().getContentType()).hasToString("image/svg+xml");
         assertThat(icon.getBody()).contains("#FFD43B");
+    }
+
+    // Issue #2: unknown coachType in a sidecar must not kill the entire sidebar listing
+    @Test
+    void listConversations_withUnknownCoachTypeInSidecar_doesNotCrashAndReturnsBothEntries()
+            throws IOException {
+        queueText("plain answer");
+        String goodId = json(postChat(chatBody("hi", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+
+        // Inject a .jsonl + .meta.json with an unrecognised coachType
+        String badId = "corrupt-sidecar-000";
+        Files.writeString(CONV_DIR.resolve(badId + ".jsonl"),
+                "{\"role\":\"user\",\"content\":\"hello\",\"model\":\"opus-4-8\"}\n");
+        Files.writeString(CONV_DIR.resolve(badId + ".meta.json"),
+                "{\"coachType\":\"unknown-future-coach\"}");
+
+        ResponseEntity<String> resp = rest.getForEntity(url("/api/conversations"), String.class);
+
+        // Both entries appear — corrupt meta falls back to first-message preview, no 500
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var ids = new ArrayList<String>();
+        json(resp).forEach(item -> ids.add(item.get("conversationId").asText()));
+        assertThat(ids).contains(goodId);
+        assertThat(ids).contains(badId);
+    }
+
+    // Issue #10: removing a scenario file must not expose internal paths in the 500 response
+    @Test
+    void coachFollowUp_whenScenarioFileRemoved_returns500WithoutInternalPath() throws IOException {
+        writeCooPrompt("01-scenario.md", "SCENARIO CONTENT");
+        queueText("opening answer");
+        String cid = json(postChat(coachBody("chief-operating-officer")))
+                .get("conversationId").asText();
+
+        Files.delete(cooDir().resolve("01-scenario.md"));
+
+        ResponseEntity<String> resp = postChat(chatBody("follow-up?", "opus-4-8", null, cid));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        String message = json(resp).get("message").asText();
+        assertThat(message).doesNotContain(COACHES_DIR.toString());
     }
 }

@@ -40,13 +40,15 @@ public class SdkAnthropicGateway {
         this.client = client;
     }
 
-    public List<AnthropicBlock> createMessage(String modelId, int maxTokens,
+    public List<AnthropicBlock> createMessage(String modelId, int maxTokens, String system,
                                               List<ApiMessage> messages,
                                               Map<String, Object> extraBody) {
         MessageCreateParams.Builder builder = MessageCreateParams.builder()
                 .model(modelId)
                 .maxTokens(maxTokens)
                 .addBeta(FILES_BETA);
+
+        if (system != null && !system.isBlank()) builder.system(system);
 
         for (ApiMessage turn : messages) {
             BetaMessageParam.Role role = "assistant".equals(turn.role())

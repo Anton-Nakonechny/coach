@@ -51,7 +51,16 @@ history** rebuilt from disk.
   the Java analog of Python's `extra_body`. Tests replace it with a `@MockitoBean`.
 - **`store/ConversationStore`** — JSON-Lines persistence: one
   `<conversations-dir>/<id>.jsonl` per conversation. Soft-delete archives one file
-  to gzip or all of them to a single timestamped zip under `archive/`.
+  to gzip or all of them to a single timestamped zip under `archive/`. A coach
+  conversation also has a `<id>.meta.json` sidecar (coachType + promptFile),
+  removed on archive/delete; the sidebar listing derives coach conversations'
+  `preview` ("COO · kpi okr") and `coachType` from it instead of the first message.
+- **`coach/CoachService`** — coach personas. A new chat with `coachType` picks a
+  random scenario `.md` under `<coaches-dir>/<coach folder>` (READMEs/dotfiles
+  excluded), persists the pick via the sidecar, and every turn resends
+  persona + whole scenario file as the `system` prompt. The first user turn is the
+  synthetic `OPENING_INSTRUCTION`, stored and displayed like any message. SPANISH
+  is enum + UI only (400 until prompts exist).
 - **`web/ChatController`** + `ApiExceptionHandler` — the seven route handlers (`/api/chat`
   has JSON + multipart overloads); the handler maps
   errors to `{"message": ...}` (FastAPI used `{"detail": ...}`) with idiomatic Spring

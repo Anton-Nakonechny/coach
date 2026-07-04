@@ -3,6 +3,10 @@ package com.coach.web;
 import com.coach.anthropic.AttachmentBlock;
 import com.coach.anthropic.ClaudeClient;
 import com.coach.attach.AttachmentService;
+import com.coach.coach.CoachMeta;
+import com.coach.coach.CoachService;
+import com.coach.coach.SentenceParser;
+import com.coach.model.CoachType;
 import com.coach.model.ModelKey;
 import com.coach.model.ModelsConfig;
 import com.coach.store.ConversationStore;
@@ -10,6 +14,8 @@ import com.coach.web.dto.ChatRequest;
 import com.coach.web.dto.ChatResponse;
 import com.coach.web.dto.ConversationItem;
 import com.coach.web.dto.MessageItem;
+import com.coach.web.dto.Role;
+import com.coach.web.dto.SentenceItem;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.util.StringUtils;
@@ -42,13 +48,15 @@ public class ChatController {
     private final ConversationStore store;
     private final ModelsConfig models;
     private final AttachmentService attachments;
+    private final CoachService coachService;
 
     public ChatController(ClaudeClient claudeClient, ConversationStore store, ModelsConfig models,
-                          AttachmentService attachments) {
+                          AttachmentService attachments, CoachService coachService) {
         this.claudeClient = claudeClient;
         this.store = store;
         this.models = models;
         this.attachments = attachments;
+        this.coachService = coachService;
     }
 
     /** Text-only chat turn (JSON body) — the original contract, unchanged. */
@@ -65,30 +73,63 @@ public class ChatController {
     }
 
     private ChatResponse handle(ChatRequest request, List<MultipartFile> files) {
-        // A turn needs either text or at least one attachment.
-        if (!StringUtils.hasText(request.message()) && files.isEmpty()) {
+        CoachType coach = request.coachType() != null ? request.coachType() : CoachType.NONE;
+        String message = request.message();
+
+        if (StringUtils.hasText(request.topic()) && coach != CoachType.SPANISH)
+            throw new InvalidRequestException("topic can only be set for the Spanish tutor");
+        if (coach != CoachType.NONE && StringUtils.hasText(request.conversationId()))
+            throw new InvalidRequestException("coachType can only be set when starting a new chat");
+
+        if (coach == CoachType.SPANISH) {
+            if (!StringUtils.hasText(request.topic()))
+                throw new InvalidRequestException("topic is required for the Spanish tutor");
+            if (!StringUtils.hasText(message) && files.isEmpty())
+                throw new InvalidRequestException("message or files are required for the Spanish tutor");
+        } else if (coach != CoachType.NONE) {
+            if (StringUtils.hasText(message))
+                throw new InvalidRequestException("message must be blank when starting a coach chat");
+            message = CoachService.OPENING_INSTRUCTION;
+        } else if (!StringUtils.hasText(message) && files.isEmpty()) {
             throw new InvalidRequestException("message must not be blank");
         }
 
-        // An unknown model key is already rejected (400) when Jackson parses ModelKey.
-        ModelKey model = request.model() != null
-                ? request.model()
-                : models.defaultModel();
-        // Effort is null when omitted — no defaulting here (the frontend seeds its
-        // own default from /api/models). A null/unknown effort is simply not sent.
+        ModelKey model = request.model() != null ? request.model() : models.defaultModel();
         String effort = request.effort();
 
         String conversationId = StringUtils.hasText(request.conversationId())
                 ? request.conversationId()
                 : UUID.randomUUID().toString().replace("-", "");
 
-        List<AttachmentBlock> uploaded = attachments.process(files);
+        if (coach == CoachType.SPANISH) {
+            // Validates topic membership — throws 400/500 before any persistence.
+            CoachMeta meta = coachService.startSpanish(request.topic().trim());
+            store.saveCoachMeta(conversationId, meta);
+            message = coachService.spanishOpeningPrompt(
+                    meta.topic(),
+                    StringUtils.hasText(message) ? message.trim() : null);
+        } else if (coach != CoachType.NONE) {
+            store.saveCoachMeta(conversationId, coachService.startCoach(coach));
+        }
 
-        store.appendMessage(conversationId, "user", request.message(), model.value(), effort, uploaded);
-        String answer = claudeClient.generate(model, store.apiMessages(conversationId), effort);
+        List<AttachmentBlock> uploaded = attachments.process(files);
+        var meta = store.coachMeta(conversationId);
+        String system = meta.map(coachService::systemPrompt).orElse(null);
+
+        store.appendMessage(conversationId, "user", message, model.value(), effort, uploaded);
+        String answer = claudeClient.generate(model, store.apiMessages(conversationId), effort, system);
         store.appendMessage(conversationId, "assistant", answer, model.value(), effort);
 
-        return new ChatResponse(answer, model, conversationId);
+        var sentences = meta
+                .filter(m -> m.coachType() == CoachType.SPANISH)
+                .map(__ -> parseSentences(answer))
+                .orElse(null);
+        return new ChatResponse(answer, model, conversationId, sentences);
+    }
+
+    @GetMapping("/coaches/spanish/topics")
+    public List<String> spanishTopics() {
+        return coachService.spanishTopics();
     }
 
     @GetMapping("/models")
@@ -107,11 +148,23 @@ public class ChatController {
 
     @GetMapping("/conversations/{conversationId}")
     public List<MessageItem> getConversation(@PathVariable String conversationId) {
-        List<   MessageItem> messages = store.loadMessages(conversationId);
-        if (messages.isEmpty()) {
+        List<MessageItem> messages = store.loadMessages(conversationId);
+        if (messages.isEmpty())
             throw new ConversationNotFoundException("Conversation not found");
-        }
-        return messages;
+        boolean isSpanish = store.coachMeta(conversationId)
+                .map(m -> m.coachType() == CoachType.SPANISH)
+                .orElse(false);
+        if (!isSpanish) return messages;
+        return messages.stream().map(m -> {
+            if (m.role() != Role.ASSISTANT) return m;
+            var s = parseSentences(m.content());
+            return s == null ? m : m.withSentences(s);
+        }).toList();
+    }
+
+    private List<SentenceItem> parseSentences(String text) {
+        var parsed = SentenceParser.parse(text);
+        return parsed.isEmpty() ? null : parsed;
     }
 
     @DeleteMapping("/conversations")
