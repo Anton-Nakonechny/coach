@@ -1,0 +1,58 @@
+server:
+  port: 9999
+
+spring:
+  # Load the gitignored key file the standard Spring way. It is plain unquoted
+  # KEY=value (also valid as a .properties file — hence the [.properties] hint), so
+  # no custom parsing is needed. optional: => a missing file is not an error (tests
+  # run without one). Real env vars / system properties still outrank imported config,
+  # so an exported ANTHROPIC_API_KEY wins over the file. Mirrors run.sh's old search.
+  config:
+    import:
+      - optional:file:.env.key[.properties]
+      - optional:file:.env[.properties]
+      - optional:file:../.env.key[.properties]
+      - optional:file:../.env[.properties]
+  application:
+    name: coach
+  web:
+    resources:
+      # No-cache for the static frontend during development.
+      cache:
+        cachecontrol:
+          no-cache: true
+          no-store: true
+          must-revalidate: true
+  servlet:
+    multipart:
+      # First line of defense before our own attachment validation runs.
+      max-file-size: 64MB
+      max-request-size: 256MB
+
+coach:
+  # Anthropic API key, read from the environment. Tests never need it (the gateway
+  # is faked), matching the Python suite.
+  anthropic-api-key: ${ANTHROPIC_API_KEY:}
+  # Cap non-streaming output to stay well under SDK HTTP timeouts.
+  max-tokens: 16000
+  # Where per-conversation JSONL files live. Overridden to a tmp dir in tests.
+  conversations-dir: conversations
+  # File-attachment limits (see AppConfig.Upload). Attachments are uploaded to the
+  # Anthropic Files API; zips are expanded server-side into individual attachments.
+  upload:
+    max-file-size-bytes: 33554432        # 32 MB per file
+    max-files-per-message: 20            # after zip expansion
+    max-zip-entries: 200
+    max-total-extracted-bytes: 134217728 # 128 MB total uncompressed per zip
+    allowed-mime-types:
+      - image/png
+      - image/jpeg
+      - image/gif
+      - image/webp
+      - application/pdf
+      - text/plain
+      - text/markdown
+      - text/csv
+      - application/json
+      - application/xml
+      - application/zip

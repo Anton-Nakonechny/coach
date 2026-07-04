@@ -1,0 +1,10 @@
+target/
+conversations/
+.env
+.env.key
+*.log
+.md/
+.DS_Store
+.idea/
+*.iml
+*.swp

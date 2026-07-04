@@ -1,0 +1,985 @@
+package com.coach;
+
+import com.coach.anthropic.AnthropicBlock;
+import com.coach.anthropic.ApiMessage;
+import com.coach.anthropic.AttachmentBlock;
+import static com.coach.anthropic.MimeType.APPLICATION_PDF;
+import static com.coach.anthropic.MimeType.IMAGE_PNG;
+import static com.coach.anthropic.MimeType.TEXT_MARKDOWN;
+import static com.coach.anthropic.MimeType.TEXT_PLAIN;
+import com.coach.anthropic.SdkAnthropicGateway;
+import com.coach.anthropic.SdkFileUploadGateway;
+import com.coach.anthropic.TextBlock;
+import com.coach.anthropic.UploadedFile;
+import com.coach.store.ConversationStore;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipOutputStream;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+
+/**
+ * Black-box end-to-end tests of the Coach HTTP contract — Java port of
+ * {@code backend/tests/test_api.py}. The whole owned stack runs for real
+ * (controller, request shaping, JSONL persistence in a tmp dir); only the
+ * Anthropic boundary is faked via a Mockito {@code @MockitoBean}.
+ *
+ * <p>Status codes follow idiomatic Spring conventions: bad input → 400 (Bean
+ * Validation), unknown model → 400, not found → 404, upstream failure → 500.
+ * Error bodies are {@code {"message": ...}}.
+ */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class ChatApiTest {
+
+    static final Path CONV_DIR;
+
+    static {
+        try {
+            CONV_DIR = Files.createTempDirectory("coach-test-conv");
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @DynamicPropertySource
+    static void properties(DynamicPropertyRegistry registry) {
+        registry.add("coach.conversations-dir", CONV_DIR::toString);
+        // Small caps so limits can be exercised with tiny inputs (allowed-mime-types
+        // stays as configured in application.yml).
+        registry.add("coach.upload.max-file-size-bytes", () -> 1024);
+        registry.add("coach.upload.max-files-per-message", () -> 5);
+        registry.add("coach.upload.max-zip-entries", () -> 10);
+        registry.add("coach.upload.max-total-extracted-bytes", () -> 8192);
+    }
+
+    @LocalServerPort
+    int port;
+
+    @Autowired
+    TestRestTemplate rest;
+
+    @MockitoBean
+    SdkAnthropicGateway gateway;
+
+    @MockitoBean
+    SdkFileUploadGateway fileUploadGateway;
+
+    @Autowired
+    ConversationStore store;
+
+    private final Deque<List<AnthropicBlock>> pendingResponses = new ArrayDeque<>();
+    private final List<GatewayCall> gatewayCalls = new ArrayList<>();
+    private final List<FakeUpload> uploads = new ArrayList<>();
+    private final List<String> deleted = new ArrayList<>();
+    private int uploadSeq;
+    final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void setUp() throws IOException {
+        doAnswer(inv -> {
+            gatewayCalls.add(new GatewayCall(
+                inv.getArgument(0), inv.getArgument(1), List.copyOf(inv.getArgument(2)),
+                Map.copyOf(inv.getArgument(3))));
+            return pendingResponses.isEmpty()
+                ? List.of(new AnthropicBlock("text", "(no scripted response)"))
+                : pendingResponses.poll();
+        }).when(gateway).createMessage(any(), anyInt(), any(), any());
+        doAnswer(inv -> {
+            String fn = inv.getArgument(0);
+            String mt = inv.getArgument(1);
+            byte[] bytes = inv.getArgument(2);
+            uploads.add(new FakeUpload(fn, mt, bytes.length));
+            return new UploadedFile(String.format("file_test_%04d", ++uploadSeq), mt, fn);
+        }).when(fileUploadGateway).upload(any(), any(), any());
+        doAnswer(inv -> { deleted.add(inv.getArgument(0, String.class)); return null; })
+                .when(fileUploadGateway).delete(any());
+        if (Files.exists(CONV_DIR)) {
+            try (var paths = Files.walk(CONV_DIR)) {
+                paths.sorted((a, b) -> b.compareTo(a))
+                        .filter(p -> !p.equals(CONV_DIR))
+                        .forEach(p -> {
+                            try {
+                                Files.delete(p);
+                            } catch (IOException e) {
+                                throw new RuntimeException(e);
+                            }
+                        });
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Helpers
+    // ----------------------------------------------------------------------- //
+
+    private String url(String path) {
+        return "http://localhost:" + port + path;
+    }
+
+    private ResponseEntity<String> postChat(Map<String, Object> body) {
+        return rest.postForEntity(url("/api/chat"), body, String.class);
+    }
+
+    /** A file part for a multipart chat request. */
+    record PartFile(String filename, String contentType, byte[] bytes) { }
+
+    record GatewayCall(String modelId, int maxTokens, List<ApiMessage> messages, Map<String, Object> extraBody) {}
+
+    record FakeUpload(String filename, String mediaType, int byteLength) {}
+
+    /** POST {@code /api/chat} as multipart: a JSON {@code request} part + {@code files} parts. */
+    private ResponseEntity<String> postChatMultipart(Map<String, Object> request, List<PartFile> files) {
+        MultiValueMap<String, Object> parts = new LinkedMultiValueMap<>();
+
+        HttpHeaders jsonHeaders = new HttpHeaders();
+        jsonHeaders.setContentType(MediaType.APPLICATION_JSON);
+        try {
+            parts.add("request", new HttpEntity<>(mapper.writeValueAsString(request), jsonHeaders));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        for (PartFile pf : files) {
+            HttpHeaders h = new HttpHeaders();
+            h.setContentType(MediaType.parseMediaType(pf.contentType()));
+            ByteArrayResource res = new ByteArrayResource(pf.bytes()) {
+                @Override
+                public String getFilename() {
+                    return pf.filename();
+                }
+            };
+            parts.add("files", new HttpEntity<>(res, h));
+        }
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        return rest.postForEntity(url("/api/chat"), new HttpEntity<>(parts, headers), String.class);
+    }
+
+    private JsonNode json(ResponseEntity<String> resp) {
+        try {
+            return mapper.readTree(resp.getBody());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static Map<String, Object> chatBody(String message, String model, String effort, String conversationId) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("message", message);
+        if (model != null) body.put("model", model);
+        if (effort != null) body.put("effort", effort);
+        if (conversationId != null) body.put("conversationId", conversationId);
+        return body;
+    }
+
+    private List<String> roles(GatewayCall call) {
+        return call.messages().stream().map(ApiMessage::role).toList();
+    }
+
+    /** Concatenated text of a turn's {@link TextBlock}s (ignores attachment blocks). */
+    private String textOf(ApiMessage message) {
+        return message.content().stream()
+                .filter(b -> b instanceof TextBlock)
+                .map(b -> ((TextBlock) b).text())
+                .collect(Collectors.joining());
+    }
+
+    /** The last (most recent) message sent to the gateway on the latest call. */
+    private ApiMessage lastUserMessage() {
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        return call.messages().get(call.messages().size() - 1);
+    }
+
+    /** Build an in-memory zip from alternating {@code name, content} arguments. */
+    private static byte[] zip(String... nameThenContentPairs) {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(bos)) {
+            for (int i = 0; i < nameThenContentPairs.length; i += 2) {
+                zos.putNextEntry(new ZipEntry(nameThenContentPairs[i]));
+                zos.write(nameThenContentPairs[i + 1].getBytes(UTF_8));
+                zos.closeEntry();
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return bos.toByteArray();
+    }
+
+    private void queueText(String text) {
+        pendingResponses.add(List.of(new AnthropicBlock("text", text)));
+    }
+
+    private void queueBlocks(AnthropicBlock... blocks) {
+        pendingResponses.add(List.of(blocks));
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Chat flow + persistence
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void chatMintsConversationAndReturnsAnswer() {
+        queueText("Hello there.");
+
+        ResponseEntity<String> resp = postChat(chatBody("hi", "opus-4-8", null, null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = json(resp);
+        assertThat(body.get("answer").asText()).isEqualTo("Hello there.");
+        assertThat(body.get("model").asText()).isEqualTo("opus-4-8");
+        assertThat(body.get("conversationId").asText()).isNotBlank();
+    }
+
+    @Test
+    void chatPersistsBothTurnsAsJsonl() throws IOException {
+        queueText("an answer");
+
+        String cid = json(postChat(chatBody("a question", "sonnet-4-6", "high", null)))
+                .get("conversationId").asText();
+
+        List<String> lines = Files.readAllLines(CONV_DIR.resolve(cid + ".jsonl"));
+        assertThat(lines).hasSize(2);
+        JsonNode userRec = mapper.readTree(lines.get(0));
+        JsonNode asstRec = mapper.readTree(lines.get(1));
+        assertThat(userRec.get("role").asText()).isEqualTo("user");
+        assertThat(asstRec.get("role").asText()).isEqualTo("assistant");
+        assertThat(userRec.get("content").asText()).isEqualTo("a question");
+        assertThat(asstRec.get("content").asText()).isEqualTo("an answer");
+        // Metadata captured on every line.
+        assertThat(userRec.get("model").asText()).isEqualTo("sonnet-4-6");
+        assertThat(userRec.get("effort").asText()).isEqualTo("high");
+        assertThat(asstRec.get("ts").asText()).isNotBlank();
+    }
+
+    @Test
+    void chatReusesConversationAndResendsFullHistory() {
+        queueText("first");
+        queueText("second");
+
+        String cid = json(postChat(chatBody("q1", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+        ResponseEntity<String> second = postChat(chatBody("q2", "opus-4-8", null, cid));
+
+        assertThat(second.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(second).get("conversationId").asText()).isEqualTo(cid);
+        assertThat(store.loadMessages(cid)).hasSize(4);
+        GatewayCall secondCall = gatewayCalls.get(1);
+        assertThat(roles(secondCall)).containsExactly("user", "assistant", "user");
+        assertThat(textOf(secondCall.messages().get(0))).isEqualTo("q1");
+        assertThat(textOf(secondCall.messages().get(2))).isEqualTo("q2");
+    }
+
+    @Test
+    void chatJoinsOnlyTextBlocks() {
+        queueBlocks(
+                new AnthropicBlock("thinking", ""),
+                new AnthropicBlock("text", "Part one. "),
+                new AnthropicBlock("text", "Part two."));
+
+        String answer = json(postChat(chatBody("hi", "opus-4-8", null, null)))
+                .get("answer").asText();
+
+        assertThat(answer).isEqualTo("Part one. Part two.");
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Attachments
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void chatWithImageAttachmentUploadsAndSendsImageBlock() {
+        queueText("I see a red square.");
+        byte[] png = {(byte) 0x89, 'P', 'N', 'G', 0, 0, 0, 1};
+
+        ResponseEntity<String> resp = postChatMultipart(
+                chatBody("what is this?", "opus-4-8", null, null),
+                List.of(new PartFile("square.png", "image/png", png)));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+
+        // Uploaded to the (faked) Files API exactly once, with the right name + type.
+        assertThat(uploads).singleElement().satisfies(u -> {
+            assertThat(u.filename()).isEqualTo("square.png");
+            assertThat(u.mediaType()).isEqualTo("image/png");
+        });
+
+        // Claude received a text block + an image block referencing the returned file_id.
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        ApiMessage lastUser = call.messages().get(call.messages().size() - 1);
+        assertThat(lastUser.role()).isEqualTo("user");
+        assertThat(lastUser.content()).containsExactly(
+                new TextBlock("what is this?"),
+                new AttachmentBlock("file_test_0001", IMAGE_PNG, "square.png",
+                        AttachmentBlock.Kind.IMAGE));
+    }
+
+    @Test
+    void chatWithPdfSendsDocumentBlock() {
+        queueText("ok");
+
+        postChatMultipart(chatBody("summarize", "opus-4-8", null, null),
+                List.of(new PartFile("doc.pdf", "application/pdf", new byte[]{'%', 'P', 'D', 'F'})));
+
+        assertThat(lastUserMessage().content()).containsExactly(
+                new TextBlock("summarize"),
+                new AttachmentBlock("file_test_0001", APPLICATION_PDF, "doc.pdf",
+                        AttachmentBlock.Kind.DOCUMENT));
+    }
+
+    @Test
+    void chatWithTextFileSendsDocumentBlock() {
+        queueText("ok");
+
+        postChatMultipart(chatBody("review", "opus-4-8", null, null),
+                List.of(new PartFile("notes.md", "text/markdown", "# hi".getBytes(UTF_8))));
+
+        assertThat(lastUserMessage().content()).containsExactly(
+                new TextBlock("review"),
+                new AttachmentBlock("file_test_0001", TEXT_MARKDOWN, "notes.md",
+                        AttachmentBlock.Kind.DOCUMENT));
+    }
+
+    @Test
+    void imageVsDocumentSelectedByMime() {
+        queueText("ok");
+
+        postChatMultipart(chatBody("both", "opus-4-8", null, null),
+                List.of(new PartFile("a.png", "image/png", new byte[]{1}),
+                        new PartFile("b.pdf", "application/pdf", new byte[]{2})));
+
+        assertThat(lastUserMessage().content()).containsExactly(
+                new TextBlock("both"),
+                new AttachmentBlock("file_test_0001", IMAGE_PNG, "a.png",
+                        AttachmentBlock.Kind.IMAGE),
+                new AttachmentBlock("file_test_0002", APPLICATION_PDF, "b.pdf",
+                        AttachmentBlock.Kind.DOCUMENT));
+    }
+
+    @Test
+    void attachmentsPersistedInJsonl() throws IOException {
+        queueText("ok");
+
+        String cid = json(postChatMultipart(chatBody("look", "opus-4-8", null, null),
+                List.of(new PartFile("a.png", "image/png", new byte[]{1}))))
+                .get("conversationId").asText();
+
+        List<String> lines = Files.readAllLines(CONV_DIR.resolve(cid + ".jsonl"));
+        JsonNode userRec = mapper.readTree(lines.get(0));
+        assertThat(userRec.get("content").asText()).isEqualTo("look");
+        JsonNode atts = userRec.get("attachments");
+        assertThat(atts).isNotNull();
+        assertThat(atts).hasSize(1);
+        assertThat(atts.get(0).get("fileId").asText()).isEqualTo("file_test_0001");
+        assertThat(atts.get(0).get("filename").asText()).isEqualTo("a.png");
+        assertThat(atts.get(0).get("mediaType").asText()).isEqualTo("image/png");
+        assertThat(atts.get(0).get("kind").asText()).isEqualTo("IMAGE");
+    }
+
+    @Test
+    void historyResendReReferencesFileIdsWithoutReupload() {
+        queueText("first");
+        queueText("second");
+
+        String cid = json(postChatMultipart(chatBody("q1 with file", "opus-4-8", null, null),
+                List.of(new PartFile("a.png", "image/png", new byte[]{1}))))
+                .get("conversationId").asText();
+        postChat(chatBody("q2", "opus-4-8", null, cid));
+
+        // Only one upload ever happened — the resent history re-references the file_id.
+        assertThat(uploads).hasSize(1);
+        GatewayCall secondCall = gatewayCalls.get(1);
+        ApiMessage firstUser = secondCall.messages().get(0);
+        assertThat(firstUser.content()).containsExactly(
+                new TextBlock("q1 with file"),
+                new AttachmentBlock("file_test_0001", IMAGE_PNG, "a.png",
+                        AttachmentBlock.Kind.IMAGE));
+    }
+
+    @Test
+    void fileOnlyTurnIsAllowed() {
+        queueText("I see it.");
+
+        ResponseEntity<String> resp = postChatMultipart(
+                chatBody(null, "opus-4-8", null, null),
+                List.of(new PartFile("a.png", "image/png", new byte[]{1})));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        // Just the image block — no empty text block when there's no message.
+        assertThat(lastUserMessage().content()).containsExactly(
+                new AttachmentBlock("file_test_0001", IMAGE_PNG, "a.png",
+                        AttachmentBlock.Kind.IMAGE));
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Zip expansion + upload security
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void zipExpandsIntoIndividualAttachmentsIncludingNested() {
+        queueText("ok");
+        byte[] zip = zip("top.txt", "a", "sub/nested.txt", "b");
+
+        postChatMultipart(chatBody("here", "opus-4-8", null, null),
+                List.of(new PartFile("bundle.zip", "application/zip", zip)));
+
+        // Two files uploaded (including the nested one); the zip itself is not uploaded.
+        // The nested entry is flattened to its basename so the Files API filename has no '/'.
+        assertThat(uploads).hasSize(2);
+        assertThat(uploads.stream().map(FakeUpload::filename))
+                .containsExactly("top.txt", "nested.txt");
+        assertThat(lastUserMessage().content()).containsExactly(
+                new TextBlock("here"),
+                new AttachmentBlock("file_test_0001", TEXT_PLAIN, "top.txt",
+                        AttachmentBlock.Kind.DOCUMENT),
+                new AttachmentBlock("file_test_0002", TEXT_PLAIN, "nested.txt",
+                        AttachmentBlock.Kind.DOCUMENT));
+    }
+
+    @Test
+    void filenameWithForbiddenCharactersIsSanitizedBeforeUpload() {
+        queueText("ok");
+
+        // Accented + punctuation the Files API rejects: diacritics fold to ASCII,
+        // ':' becomes '_'. So "café: report.png" -> "cafe_ report.png".
+        postChatMultipart(chatBody("what is this?", "opus-4-8", null, null),
+                List.of(new PartFile("café: report.png", "image/png", new byte[]{(byte) 0x89, 'P', 'N', 'G'})));
+
+        assertThat(uploads).singleElement().satisfies(u ->
+                assertThat(u.filename()).isEqualTo("cafe_ report.png"));
+        assertThat(lastUserMessage().content()).containsExactly(
+                new TextBlock("what is this?"),
+                new AttachmentBlock("file_test_0001", IMAGE_PNG, "cafe_ report.png",
+                        AttachmentBlock.Kind.IMAGE));
+    }
+
+    @Test
+    void zipSkipsMacOsMetadataEntries() {
+        queueText("ok");
+        // A Finder-created zip bundles a __MACOSX/ tree of AppleDouble (._*) resource-fork
+        // files plus .DS_Store — none of which are real attachments.
+        byte[] zip = zip(
+                "__MACOSX/._photo.png", "appledouble-junk",
+                ".DS_Store", "ds-junk",
+                "docs/._notes.txt", "appledouble-junk",
+                "photo.png", "real");
+
+        postChatMultipart(chatBody("here", "opus-4-8", null, null),
+                List.of(new PartFile("bundle.zip", "application/zip", zip)));
+
+        // Only the genuine file is uploaded; the macOS cruft is silently dropped.
+        assertThat(uploads).singleElement().satisfies(u ->
+                assertThat(u.filename()).isEqualTo("photo.png"));
+    }
+
+    @Test
+    void zipSlipEntryRejectedWith400() {
+        byte[] zip = zip("../evil.txt", "x");
+
+        ResponseEntity<String> resp = postChatMultipart(chatBody("m", "opus-4-8", null, null),
+                List.of(new PartFile("bad.zip", "application/zip", zip)));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(uploads).isEmpty();
+    }
+
+    @Test
+    void nestedZipRejectedWith400() {
+        byte[] zip = zip("inner.zip", "whatever");
+
+        ResponseEntity<String> resp = postChatMultipart(chatBody("m", "opus-4-8", null, null),
+                List.of(new PartFile("outer.zip", "application/zip", zip)));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(uploads).isEmpty();
+    }
+
+    @Test
+    void zipTotalExtractedSizeCapReturns400() {
+        String oneKb = "a".repeat(1000);
+        String[] pairs = new String[18]; // 9 entries × 1000 bytes = 9000 > 8192 cap
+        for (int i = 0; i < 9; i++) {
+            pairs[i * 2] = "e" + i + ".txt";
+            pairs[i * 2 + 1] = oneKb;
+        }
+        byte[] zip = zip(pairs);
+
+        ResponseEntity<String> resp = postChatMultipart(chatBody("m", "opus-4-8", null, null),
+                List.of(new PartFile("big.zip", "application/zip", zip)));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(uploads).isEmpty();
+    }
+
+    @Test
+    void disallowedEntryInsideZipRejectsWholeRequest() {
+        byte[] zip = zip("ok.txt", "x", "bad.exe", "y");
+
+        ResponseEntity<String> resp = postChatMultipart(chatBody("m", "opus-4-8", null, null),
+                List.of(new PartFile("mix.zip", "application/zip", zip)));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(uploads).isEmpty();
+    }
+
+    @Test
+    void fileTooLargeReturns400() {
+        ResponseEntity<String> resp = postChatMultipart(chatBody("m", "opus-4-8", null, null),
+                List.of(new PartFile("big.txt", "text/plain", new byte[2000])));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(uploads).isEmpty();
+    }
+
+    @Test
+    void tooManyFilesReturns400() {
+        List<PartFile> six = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            six.add(new PartFile("f" + i + ".png", "image/png", new byte[]{1}));
+        }
+
+        ResponseEntity<String> resp = postChatMultipart(chatBody("m", "opus-4-8", null, null), six);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(uploads).isEmpty();
+    }
+
+    @Test
+    void disallowedTypeReturns400() {
+        ResponseEntity<String> resp = postChatMultipart(chatBody("m", "opus-4-8", null, null),
+                List.of(new PartFile("bad.exe", "application/octet-stream", new byte[]{1})));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(uploads).isEmpty();
+    }
+
+    @Test
+    void archivingConversationDeletesUploadedFiles() {
+        queueText("ok");
+        String cid = json(postChatMultipart(chatBody("look", "opus-4-8", null, null),
+                List.of(new PartFile("a.png", "image/png", new byte[]{1}))))
+                .get("conversationId").asText();
+
+        rest.exchange(url("/api/conversations/" + cid), HttpMethod.DELETE, null, String.class);
+
+        assertThat(deleted).containsExactly("file_test_0001");
+    }
+
+    @Test
+    void getConversationReturnsAttachmentMetadata() {
+        queueText("ok");
+        String cid = json(postChatMultipart(chatBody("look", "opus-4-8", null, null),
+                List.of(new PartFile("a.png", "image/png", new byte[]{1}))))
+                .get("conversationId").asText();
+
+        JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+        JsonNode atts = messages.get(0).get("attachments");
+        assertThat(atts).hasSize(1);
+        assertThat(atts.get(0).get("fileId").asText()).isEqualTo("file_test_0001");
+        assertThat(atts.get(0).get("filename").asText()).isEqualTo("a.png");
+        assertThat(atts.get(0).get("mediaType").asText()).isEqualTo("image/png");
+        assertThat(atts.get(0).get("kind").asText()).isEqualTo("IMAGE");
+        // Assistant turn carries no attachments.
+        assertThat(messages.get(1).get("attachments")).isEmpty();
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Per-model request shaping — the "ignored if not applicable" rule
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void effortCapableModelSendsThinkingAndEffort() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "opus-4-7", "max", null));
+
+        GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(sent.modelId()).isEqualTo("claude-opus-4-7");
+        assertThat(sent.maxTokens()).isEqualTo(16000);
+        assertThat(sent.extraBody()).isEqualTo(Map.of(
+                "thinking", Map.of("type", "adaptive"),
+                "output_config", Map.of("effort", "max")));
+    }
+
+    @Test
+    void haikuOmitsEffortAndThinking() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "haiku-4-5", "high", null));
+
+        GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(sent.modelId()).isEqualTo("claude-haiku-4-5");
+        assertThat(sent.extraBody()).isEmpty();
+    }
+
+    @Test
+    void effortCapableModelWithoutEffortStillSendsThinking() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "opus-4-8", null, null));
+
+        GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(sent.extraBody()).isEqualTo(Map.of("thinking", Map.of("type", "adaptive")));
+    }
+
+    @Test
+    void unknownEffortValueIsDropped() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "opus-4-8", "ludicrous", null));
+
+        GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(sent.extraBody()).isEqualTo(Map.of("thinking", Map.of("type", "adaptive")));
+    }
+
+    @Test
+    void sonnetSendsThinkingAndEffort() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "sonnet-4-6", "high", null));
+
+        GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(sent.modelId()).isEqualTo("claude-sonnet-4-6");
+        assertThat(sent.extraBody()).isEqualTo(Map.of(
+                "thinking", Map.of("type", "adaptive"),
+                "output_config", Map.of("effort", "high")));
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Models endpoint
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void modelsEndpointListsFourModels() {
+        JsonNode body = json(rest.getForEntity(url("/api/models"), String.class));
+
+        List<String> keys = new java.util.ArrayList<>();
+        Map<String, Boolean> effortSupport = new HashMap<>();
+        for (JsonNode m : body.get("models")) {
+            keys.add(m.get("key").asText());
+            effortSupport.put(m.get("key").asText(), m.get("supportsEffort").asBoolean());
+        }
+        assertThat(keys).containsExactly("sonnet-4-6", "opus-4-8", "opus-4-7", "haiku-4-5");
+        assertThat(effortSupport.get("opus-4-8")).isTrue();
+        assertThat(effortSupport.get("haiku-4-5")).isFalse();
+
+        List<String> effortLevels = new java.util.ArrayList<>();
+        body.get("effortLevels").forEach(n -> effortLevels.add(n.asText()));
+        assertThat(effortLevels).containsExactly("low", "medium", "high", "max");
+        assertThat(body.get("defaultModel").asText()).isEqualTo("sonnet-4-6");
+    }
+
+    @Test
+    void modelsEndpointAllFieldsPerModel() {
+        JsonNode body = json(rest.getForEntity(url("/api/models"), String.class));
+        Map<String, JsonNode> byKey = new HashMap<>();
+        for (JsonNode m : body.get("models")) {
+            byKey.put(m.get("key").asText(), m);
+        }
+
+        JsonNode sonnet = byKey.get("sonnet-4-6");
+        assertThat(sonnet.get("id").asText()).isEqualTo("claude-sonnet-4-6");
+        assertThat(sonnet.get("label").asText()).isEqualTo("Sonnet 4.6");
+        assertThat(sonnet.get("supportsEffort").asBoolean()).isTrue();
+        assertThat(sonnet.get("adaptiveThinking").asBoolean()).isTrue();
+
+        JsonNode haiku = byKey.get("haiku-4-5");
+        assertThat(haiku.get("supportsEffort").asBoolean()).isFalse();
+        assertThat(haiku.get("adaptiveThinking").asBoolean()).isFalse();
+    }
+
+    // ----------------------------------------------------------------------- //
+    // History endpoints
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void listConversationsNewestFirstWithPreview() {
+        queueText("a1");
+        queueText("a2");
+
+        postChat(chatBody("older question", "opus-4-8", null, null));
+        postChat(chatBody("newer question", "opus-4-8", null, null));
+
+        JsonNode items = json(rest.getForEntity(url("/api/conversations"), String.class));
+        assertThat(items).hasSize(2);
+        assertThat(items.get(0).get("preview").asText()).isEqualTo("newer question");
+        assertThat(items.get(1).get("preview").asText()).isEqualTo("older question");
+        items.forEach(item -> assertThat(item.get("conversationId").asText()).isNotBlank());
+    }
+
+    @Test
+    void getConversationRehydratesMessages() {
+        queueText("the answer");
+        String cid = json(postChat(chatBody("the question", "sonnet-4-6", null, null)))
+                .get("conversationId").asText();
+
+        JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+
+        assertThat(messages.findValuesAsText("role")).containsExactly("user", "assistant");
+        assertThat(messages.get(0).get("content").asText()).isEqualTo("the question");
+        assertThat(messages.get(1).get("model").asText()).isEqualTo("sonnet-4-6");
+    }
+
+    @Test
+    void historyRoleFieldIsLowercase() {
+        queueText("the answer");
+        String cid = json(postChat(chatBody("the question", "sonnet-4-6", null, null)))
+                .get("conversationId").asText();
+
+        JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+
+        assertThat(messages.get(0).get("role").asText()).isEqualTo("user");
+        assertThat(messages.get(1).get("role").asText()).isEqualTo("assistant");
+    }
+
+    @Test
+    void getUnknownConversationReturns404() {
+        ResponseEntity<String> resp = rest.getForEntity(url("/api/conversations/does-not-exist"), String.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Error handling
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void unknownModelReturns400() {
+        ResponseEntity<String> resp = postChat(chatBody("hi", "gpt-9000", null, null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("gpt-9000");
+    }
+
+    @Test
+    void upstreamErrorPropagatesAs500() {
+        doThrow(new RuntimeException("upstream boom")).when(gateway).createMessage(any(), anyInt(), any(), any());
+
+        ResponseEntity<String> resp = postChat(chatBody("hi", "opus-4-8", null, null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).contains("upstream boom");
+    }
+
+    @Test
+    void anthropicTimeoutPropagatesAs500() {
+        doThrow(new RuntimeException("Request timed out")).when(gateway).createMessage(any(), anyInt(), any(), any());
+
+        ResponseEntity<String> resp = postChat(chatBody("hi", "opus-4-8", null, null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Input validation (idiomatic Spring → 400, where FastAPI returned 422)
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void missingMessageFieldReturns400() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("model", "opus-4-8");
+        ResponseEntity<String> resp = rest.postForEntity(url("/api/chat"), body, String.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void missingModelFieldUsesDefault() {
+        queueText("ok");
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("message", "hi");
+        ResponseEntity<String> resp = rest.postForEntity(url("/api/chat"), body, String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(resp).get("model").asText()).isEqualTo("sonnet-4-6");
+    }
+
+    @Test
+    void emptyMessageReturns400() {
+        ResponseEntity<String> resp = postChat(chatBody("", "opus-4-8", null, null));
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void whitespaceMessageReturns400() {
+        ResponseEntity<String> resp = postChat(chatBody("   ", "opus-4-8", null, null));
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Conversation depth + model switching
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void threeTurnConversationResendsFullHistory() {
+        queueText("a1");
+        queueText("a2");
+        queueText("a3");
+
+        String cid = json(postChat(chatBody("q1", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+        postChat(chatBody("q2", "opus-4-8", null, cid));
+        postChat(chatBody("q3", "opus-4-8", null, cid));
+
+        assertThat(store.loadMessages(cid)).hasSize(6);
+        assertThat(roles(gatewayCalls.get(2)))
+                .containsExactly("user", "assistant", "user", "assistant", "user");
+    }
+
+    @Test
+    void modelSwitchingMidConversationResendsFullHistory() {
+        queueText("first");
+        queueText("second");
+
+        String cid = json(postChat(chatBody("q1", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+        postChat(chatBody("q2", "haiku-4-5", null, cid));
+
+        GatewayCall secondCall = gatewayCalls.get(1);
+        assertThat(secondCall.modelId()).isEqualTo("claude-haiku-4-5");
+        assertThat(secondCall.extraBody()).isEmpty();
+        assertThat(roles(secondCall)).containsExactly("user", "assistant", "user");
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Security
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void pathTraversalConversationIdIsRejected() {
+        // Decoded this is "../../etc/passwd". Tomcat rejects the encoded slash
+        // before routing (400); the store's basename guard would otherwise yield a
+        // 404. Either way it is a client error and never serves a file outside the
+        // store. (FastAPI returned 404; both are safe.)
+        ResponseEntity<String> resp = rest.getForEntity(
+                url("/api/conversations/..%2F..%2Fetc%2Fpasswd"), String.class);
+        assertThat(resp.getStatusCode().is4xxClientError()).isTrue();
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Soft-delete / archive
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void deleteConversationArchivesAndRemoves() throws IOException {
+        queueText("an answer");
+        String cid = json(postChat(chatBody("a question", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+        String original = Files.readString(CONV_DIR.resolve(cid + ".jsonl"));
+
+        ResponseEntity<String> resp = rest.exchange(
+                url("/api/conversations/" + cid), HttpMethod.DELETE, null, String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(resp).get("conversationId").asText()).isEqualTo(cid);
+        // Original removed from the live store.
+        assertThat(store.loadMessages(cid)).isEmpty();
+        assertThat(Files.exists(CONV_DIR.resolve(cid + ".jsonl"))).isFalse();
+        // Compressed copy round-trips to the original.
+        Path gz = CONV_DIR.resolve("archive").resolve(cid + ".jsonl.gz");
+        assertThat(Files.exists(gz)).isTrue();
+        try (var in = new GZIPInputStream(Files.newInputStream(gz))) {
+            assertThat(new String(in.readAllBytes(), UTF_8)).isEqualTo(original);
+        }
+        // No longer in the sidebar listing.
+        assertThat(json(rest.getForEntity(url("/api/conversations"), String.class))).isEmpty();
+    }
+
+    @Test
+    void deleteUnknownConversationReturns404() {
+        ResponseEntity<String> resp = rest.exchange(
+                url("/api/conversations/deadbeefdeadbeefdeadbeefdeadbeef"),
+                HttpMethod.DELETE, null, String.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    @Test
+    void deleteAllConversationsBundlesAndClears() throws IOException {
+        queueText("a1");
+        queueText("a2");
+        String cid1 = json(postChat(chatBody("first", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+        String cid2 = json(postChat(chatBody("second", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+
+        ResponseEntity<String> resp = rest.exchange(
+                url("/api/conversations"), HttpMethod.DELETE, null, String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(resp).get("count").asInt()).isEqualTo(2);
+        assertThat(json(rest.getForEntity(url("/api/conversations"), String.class))).isEmpty();
+        try (var paths = Files.list(CONV_DIR)) {
+            assertThat(paths.filter(p -> p.toString().endsWith(".jsonl")).toList()).isEmpty();
+        }
+        Path archiveDir = CONV_DIR.resolve("archive");
+        List<Path> bundles;
+        try (var paths = Files.list(archiveDir)) {
+            bundles = paths.filter(p -> p.getFileName().toString().startsWith("all-")
+                    && p.toString().endsWith(".zip")).toList();
+        }
+        assertThat(bundles).hasSize(1);
+        try (ZipFile zf = new ZipFile(bundles.get(0).toFile())) {
+            Set<String> names = zf.stream().map(ZipEntry::getName).collect(Collectors.toSet());
+            assertThat(names).containsExactlyInAnyOrder(cid1 + ".jsonl", cid2 + ".jsonl");
+        }
+    }
+
+    @Test
+    void deleteAllWhenEmptyReturnsZero() {
+        ResponseEntity<String> resp = rest.exchange(
+                url("/api/conversations"), HttpMethod.DELETE, null, String.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(resp).get("count").asInt()).isEqualTo(0);
+    }
+
+    @Test
+    void getFavicon_whenChatPageLoads_servesYellowBrainSvgIcon() {
+        var html = rest.getForEntity(url("/"), String.class);
+        assertThat(html.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(html.getBody()).contains("<link rel=\"icon\" type=\"image/svg+xml\" href=\"favicon.svg\">");
+
+        var icon = rest.getForEntity(url("/favicon.svg"), String.class);
+        assertThat(icon.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(icon.getHeaders().getContentType()).hasToString("image/svg+xml");
+        assertThat(icon.getBody()).contains("#FFD43B");
+    }
+}
