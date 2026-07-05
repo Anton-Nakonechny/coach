@@ -269,6 +269,7 @@ header { display: none; }
 .chat-messages {
     flex: 1;
     overflow-y: auto;
+    overflow-anchor: none;
     padding: 2rem;
     display: flex;
     flex-direction: column;
