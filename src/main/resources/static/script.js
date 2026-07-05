@@ -625,7 +625,8 @@ async function loadConversations() {
 
             const btn = document.createElement('button');
             btn.className = 'conversation-item';
-            if (item.coachType) btn.classList.add('coach-chat');
+            if (item.coachType === 'spanish') btn.classList.add('spanish-chat');
+            else if (item.coachType) btn.classList.add('coach-chat');
             btn.textContent = item.preview;
             btn.dataset.id = item.conversationId;
             btn.addEventListener('click', () => openConversation(item.conversationId));

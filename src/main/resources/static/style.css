@@ -234,6 +234,17 @@ header { display: none; }
     color: var(--coach-accent);
 }
 
+/* Spanish conversations: gualda (Spanish flag yellow, Pantone 116) */
+.conversation-item.spanish-chat {
+    color: #f1bf00;
+    border-color: rgba(241, 191, 0, 0.45);
+}
+.conversation-item.spanish-chat:hover,
+.conversation-item.spanish-chat.active {
+    border-color: #f1bf00;
+    color: #f1bf00;
+}
+
 .muted { font-size: 0.825rem; color: var(--text-secondary); font-style: italic; }
 
 /* Main Chat Area */
