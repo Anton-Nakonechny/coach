@@ -18,6 +18,7 @@ import com.coach.web.dto.MessageItem;
 import com.coach.web.dto.QuizQuestion;
 import com.coach.web.dto.Role;
 import com.coach.web.dto.SentenceItem;
+import com.coach.web.dto.TopicSection;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.util.StringUtils;
@@ -151,7 +152,7 @@ public class ChatController {
     }
 
     @GetMapping("/coaches/spanish/topics")
-    public List<String> spanishTopics() {
+    public List<TopicSection> spanishTopics() {
         return coachService.spanishTopics();
     }
 

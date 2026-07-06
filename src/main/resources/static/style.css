@@ -467,6 +467,10 @@ header { display: none; }
 /* ── Spanish topic grid ─────────────────────────────────────── */
 
 .topic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.5rem; padding: 0.5rem 0; }
+.topic-sections { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding: 0.5rem 0; }
+.topic-section { display: flex; flex-direction: column; gap: 0.5rem; }
+.topic-section h4 { margin: 0 0 0.25rem; font-size: 0.8rem; font-weight: 600; color: var(--coach-accent); letter-spacing: 0.03em; }
+.topic-pairs { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
 .topic-button { padding: 0.4rem 0.6rem; font-size: 0.8rem; background: var(--surface); color: var(--text-secondary); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer; text-align: left; }
 .topic-button:hover { background: var(--surface-hover); color: var(--text-primary); }
 .topic-button.active { border-color: var(--coach-accent); color: var(--coach-accent); }
@@ -533,6 +537,7 @@ header { display: none; }
     .chat-input-container { padding: 0.75rem 1rem; gap: 0.5rem; }
     #chatInput { font-size: 1rem; } /* ≥16px prevents iOS focus zoom */
     .topic-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+    .topic-sections { grid-template-columns: 1fr; }
 }
 
 /* ── Attachment composer ────────────────────────────────────── */

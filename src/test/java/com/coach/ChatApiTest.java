@@ -1014,7 +1014,14 @@ class ChatApiTest {
     private static void writeSpanishTopics(String... topics) throws IOException {
         var dir = spanishDir();
         Files.createDirectories(dir);
-        Files.writeString(dir.resolve("temas.txt"), String.join("\n", topics), UTF_8);
+        Files.writeString(dir.resolve("temas-b1.txt"), String.join("\n", topics), UTF_8);
+    }
+
+    private static void writeSpanishTopicsByLevel(List<String> b1, List<String> b2) throws IOException {
+        var dir = spanishDir();
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("temas-b1.txt"), String.join("\n", b1), UTF_8);
+        Files.writeString(dir.resolve("temas-b2.txt"), String.join("\n", b2), UTF_8);
     }
 
     /** New-Spanish-chat body; topic omitted when null. */
@@ -1193,8 +1200,10 @@ class ChatApiTest {
     }
 
     @Test
-    void spanishTopicsEndpointReturnsTopicsInFileOrder() throws IOException {
-        writeSpanishTopics("Ser y estar", "", "  Por y para  ");
+    void spanishTopicsEndpointReturnsSectionsByLevelInFileOrder() throws IOException {
+        writeSpanishTopicsByLevel(
+                List.of("Ser y estar", "", "  Por y para  "),
+                List.of("Voz pasiva", "  ", "Estilo indirecto"));
 
         ResponseEntity<String> resp = rest.getForEntity(url("/api/coaches/spanish/topics"), String.class);
 
@@ -1202,8 +1211,14 @@ class ChatApiTest {
         JsonNode body = json(resp);
         assertThat(body.isArray()).isTrue();
         assertThat(body).hasSize(2);
-        assertThat(body.get(0).asText()).isEqualTo("Ser y estar");
-        assertThat(body.get(1).asText()).isEqualTo("Por y para");
+        assertThat(body.get(0).get("level").asText()).isEqualTo("B1");
+        assertThat(body.get(0).get("topics")).hasSize(2);
+        assertThat(body.get(0).get("topics").get(0).asText()).isEqualTo("Ser y estar");
+        assertThat(body.get(0).get("topics").get(1).asText()).isEqualTo("Por y para");
+        assertThat(body.get(1).get("level").asText()).isEqualTo("B2");
+        assertThat(body.get(1).get("topics")).hasSize(2);
+        assertThat(body.get(1).get("topics").get(0).asText()).isEqualTo("Voz pasiva");
+        assertThat(body.get(1).get("topics").get(1).asText()).isEqualTo("Estilo indirecto");
     }
 
     @Test

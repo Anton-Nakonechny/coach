@@ -192,6 +192,7 @@ async function enterSpanishSetup() {
         endpoint: '/coaches/spanish/topics',
         gridId: 'topicGrid',
         cached: spanishTopics,
+        render: renderSpanishTopicSections,
         onPick: t => { selectedTopic = t; setActive('.topic-button', 'topic', t); },
     });
     if (topics) spanishTopics = topics;
@@ -199,7 +200,7 @@ async function enterSpanishSetup() {
 
 // Render a coach's topic grid, lazily fetching (and returning) its topic list.
 // Returns null if loading failed, so the caller keeps its existing cache.
-async function enterTopicSetup({ welcome, setupName, endpoint, gridId, cached, onPick }) {
+async function enterTopicSetup({ welcome, setupName, endpoint, gridId, cached, onPick, render = renderTopicGrid }) {
     currentConversationId = null;
     chatMessages.innerHTML = '';
     highlightActiveConversation();
@@ -220,23 +221,47 @@ async function enterTopicSetup({ welcome, setupName, endpoint, gridId, cached, o
             return null;
         }
     }
-    renderTopicGrid(gridId, topics, onPick);
+    render(gridId, topics, onPick);
     return topics;
+}
+
+// Build one clickable topic button (shared by the flat grid and the level sections).
+function topicButton(topic, onClick) {
+    const btn = document.createElement('button');
+    btn.className = 'topic-button';
+    btn.dataset.topic = topic;
+    btn.textContent = topic;
+    btn.addEventListener('click', () => onClick(topic));
+    return btn;
 }
 
 function renderTopicGrid(gridId, topics, onClick) {
     const grid = document.createElement('div');
     grid.className = 'topic-grid';
     grid.id = gridId;
-    topics.forEach(t => {
-        const btn = document.createElement('button');
-        btn.className = 'topic-button';
-        btn.dataset.topic = t;
-        btn.textContent = t;
-        btn.addEventListener('click', () => onClick(t));
-        grid.appendChild(btn);
-    });
+    topics.forEach(t => grid.appendChild(topicButton(t, onClick)));
     chatMessages.appendChild(grid);
+}
+
+// Spanish topics arrive as ordered { level, topics } sections; render each as a
+// labelled column (e.g. B1, B2) of buttons in workbook order.
+function renderSpanishTopicSections(gridId, sections, onClick) {
+    const wrap = document.createElement('div');
+    wrap.className = 'topic-sections';
+    wrap.id = gridId;
+    sections.forEach(({ level, topics }) => {
+        const section = document.createElement('div');
+        section.className = 'topic-section';
+        const heading = document.createElement('h4');
+        heading.textContent = level;
+        section.appendChild(heading);
+        const pairs = document.createElement('div');
+        pairs.className = 'topic-pairs';
+        topics.forEach(t => pairs.appendChild(topicButton(t, onClick)));
+        section.appendChild(pairs);
+        wrap.appendChild(section);
+    });
+    chatMessages.appendChild(wrap);
 }
 
 async function enterCertSetup() {
