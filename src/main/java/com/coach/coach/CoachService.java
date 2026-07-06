@@ -28,6 +28,47 @@ public class CoachService {
     public static final String OPENING_INSTRUCTION =
             "Розпочни співбесіду — постав лише перше запитання.";
 
+    /** The synthetic first user turn of a Claude Architect quiz chat. */
+    public static final String CLAUDE_OPENING_INSTRUCTION = "Ask me the first exam question.";
+
+    private static final String CLAUDE_PERSONA = """
+            You are an exam coach preparing a student for the "Claude Certified Architect –
+            Foundations" certification. You quiz the student with realistic exam-style
+            multiple-choice questions grounded in the topic material below, one question at
+            a time, and you explain every answer.
+
+            Question rules:
+            - Exactly one correct answer and three plausible distractors — options a
+              candidate with incomplete knowledge or experience might choose.
+            - Frame each question in a realistic production context, like the real exam.
+            - Never repeat a question already asked in this conversation, and vary which
+              knowledge and skills bullets you test.
+
+            MANDATORY format of every question reply (the client parses it automatically,
+            so any deviation breaks it):
+            - First the question stem: one or more lines of plain text (a short scenario
+              and the question itself).
+            - Then EXACTLY four lines, in this order, each option on a single line:
+            A) <first option>
+            B) <second option>
+            C) <third option>
+            D) <fourth option>
+            - A question reply must contain ONLY the stem and those four option lines: no
+              introduction, no numbering, no Markdown emphasis, lists or code fences, and
+              no text after option D.
+
+            When the student answers (a letter or an option text):
+            - Reply in normal prose: state whether they are right, name the correct
+              option, explain why it is correct, and briefly explain why each of the other
+              options is wrong. Markdown is fine here.
+            - NEVER include a new question or new A) B) C) D) lines in a feedback reply —
+              the client shows a "Next question" button instead.
+            - If the student asks a follow-up about the explanation, answer it in prose,
+              again without a new question.
+
+            When the student writes "Next question.", reply with ONLY the next question in
+            the mandatory format above.""";
+
     private static final String COO_PERSONA = """
             You are a seasoned CEO interviewing a candidate for the Chief Operating Officer \
             role at your company. Follow the interview scenario below. Conduct the interview \
@@ -98,6 +139,13 @@ public class CoachService {
         return new CoachMeta(CoachType.SPANISH, null, topic);
     }
 
+    /** Validate topic membership and return the meta for a new Claude Architect conversation. */
+    public CoachMeta startClaudeArchitect(String topic) {
+        if (!claudeTopics().contains(topic))
+            throw new InvalidRequestException("Unknown Claude Architect topic: " + topic);
+        return new CoachMeta(CoachType.CLAUDE_ARCHITECT, topic + ".md", null);
+    }
+
     /** Opening practice prompt when the words are typed in: {@code %s} = topic, then the word list. */
     private static final String OPENING_WITH_WORDS = """
             Quiero practicar «%s» usando las siguientes palabras:
@@ -126,7 +174,7 @@ public class CoachService {
                 : format(OPENING_WITH_WORDS, topic, words);
     }
 
-    /** System prompt for any turn: Spanish persona + topic, or COO persona + scenario file. */
+    /** System prompt for any turn: Spanish persona + topic, or COO/Claude persona + scenario file. */
     public String systemPrompt(CoachMeta meta) {
         if (meta.coachType() == CoachType.SPANISH)
             return SPANISH_PERSONA + "\n\nTema de práctica: " + meta.topic();
@@ -135,8 +183,9 @@ public class CoachService {
         Path scenario = coachDir(meta.coachType()).resolve(safe);
         if (!Files.isRegularFile(scenario))
             throw new IllegalStateException("The coach scenario for this conversation is no longer available.");
+        var persona = meta.coachType() == CoachType.CLAUDE_ARCHITECT ? CLAUDE_PERSONA : COO_PERSONA;
         try {
-            return COO_PERSONA + "\n\n" + Files.readString(scenario);
+            return persona + "\n\n" + Files.readString(scenario);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -168,10 +217,28 @@ public class CoachService {
                 && !lower.contains("readme");
     }
 
+    /** Topics from {@code coaches/Claude/*.md} files (README and dotfiles excluded), sorted. */
+    public List<String> claudeTopics() {
+        Path dir = coachDir(CoachType.CLAUDE_ARCHITECT);
+        try (Stream<Path> files = Files.list(dir)) {
+            var topics = files
+                    .filter(CoachService::eligible)
+                    .map(p -> p.getFileName().toString().replaceFirst("(?i)\\.md$", ""))
+                    .sorted()
+                    .toList();
+            if (topics.isEmpty())
+                throw new IllegalStateException("No Claude Architect topics found: " + dir);
+            return topics;
+        } catch (IOException e) {
+            throw new IllegalStateException("No Claude Architect topics found: " + dir, e);
+        }
+    }
+
     private Path coachDir(CoachType type) {
         return switch (type) {
             case CHIEF_OPERATING_OFFICER -> coachesDir.resolve("Chief Operating Officer");
             case SPANISH -> coachesDir.resolve("Spanish");
+            case CLAUDE_ARCHITECT -> coachesDir.resolve("Claude");
             case NONE -> throw new IllegalArgumentException("No coach directory for NONE");
         };
     }

@@ -6,7 +6,8 @@ import com.fasterxml.jackson.annotation.JsonValue;
 public enum CoachType {
     NONE("none"),
     CHIEF_OPERATING_OFFICER("chief-operating-officer"),
-    SPANISH("spanish");
+    SPANISH("spanish"),
+    CLAUDE_ARCHITECT("claude-architect");
 
     private final String value;
 
@@ -21,6 +22,7 @@ public enum CoachType {
             case NONE -> "";
             case CHIEF_OPERATING_OFFICER -> "COO";
             case SPANISH -> "Español";
+            case CLAUDE_ARCHITECT -> "Claude";
         };
     }
 

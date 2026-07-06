@@ -12,3 +12,4 @@ Archive/
 node_modules/
 playwright-report/
 test-results/
+coaches/Claude/*.pdf
