@@ -1,6 +1,9 @@
 // API base URL - relative path so it works from any host
 const API_URL = '/api';
 
+// Matches the phone breakpoint in style.css where the rails become drawers
+const mobileQuery = window.matchMedia('(max-width: 768px)');
+
 // Global state
 let currentConversationId = null;
 let currentModel = null;
@@ -18,7 +21,8 @@ const SPANISH_WELCOME = 'Nuevo chat. Elige un modelo a la izquierda y un tema ab
 // DOM elements
 let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
     conversationList, clearAllButton, attachButton, fileInput, attachmentStrip,
-    composerError, dropOverlay, coachNote;
+    composerError, dropOverlay, coachNote,
+    sidebar, coachPanel, sidebarToggle, coachToggle, drawerBackdrop;
 
 document.addEventListener('DOMContentLoaded', async () => {
     chatMessages    = document.getElementById('chatMessages');
@@ -35,6 +39,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     composerError   = document.getElementById('composerError');
     dropOverlay     = document.getElementById('dropOverlay');
     coachNote       = document.getElementById('coachNote');
+    sidebar         = document.getElementById('sidebar');
+    coachPanel      = document.getElementById('coachPanel');
+    sidebarToggle   = document.getElementById('sidebarToggle');
+    coachToggle     = document.getElementById('coachToggle');
+    drawerBackdrop  = document.getElementById('drawerBackdrop');
 
     setupEventListeners();
     setupDragAndDrop();
@@ -57,13 +66,49 @@ function setupEventListeners() {
     });
     chatInput.addEventListener('input', autoResize);
     chatInput.addEventListener('paste', handlePaste);
-    document.getElementById('newChatButton').addEventListener('click', startNewChat);
+    document.getElementById('newChatButton').addEventListener('click', () => {
+        startNewChat();
+        closeDrawers();
+    });
     effortSelect.addEventListener('change', () => { currentEffort = effortSelect.value; });
     clearAllButton.addEventListener('click', clearAllConversations);
     attachButton.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
     document.querySelectorAll('input[name="coach"]').forEach(radio =>
-        radio.addEventListener('change', () => onCoachSelected(radio.value)));
+        radio.addEventListener('change', () => {
+            closeDrawers();
+            onCoachSelected(radio.value);
+        }));
+    sidebarToggle.addEventListener('click', () => toggleDrawer(sidebar, sidebarToggle));
+    coachToggle.addEventListener('click', () => toggleDrawer(coachPanel, coachToggle));
+    drawerBackdrop.addEventListener('click', closeDrawers);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawers(); });
+    // Crossing the breakpoint (rotation, resize) clears drawer state so the
+    // desktop layout never inherits a stale .open class or visible backdrop.
+    mobileQuery.addEventListener('change', (e) => { if (!e.matches) closeDrawers(); });
+}
+
+// ── Mobile drawers ───────────────────────────────────────────
+
+function openDrawer(panel, toggle) {
+    closeDrawers();
+    panel.classList.add('open');
+    toggle.setAttribute('aria-expanded', 'true');
+    drawerBackdrop.hidden = false;
+}
+
+function closeDrawers() {
+    sidebar.classList.remove('open');
+    coachPanel.classList.remove('open');
+    sidebarToggle.setAttribute('aria-expanded', 'false');
+    coachToggle.setAttribute('aria-expanded', 'false');
+    drawerBackdrop.hidden = true;
+}
+
+function toggleDrawer(panel, toggle) {
+    document.body.classList.add('drawer-anim');
+    if (panel.classList.contains('open')) closeDrawers();
+    else openDrawer(panel, toggle);
 }
 
 // ── Coach panel ──────────────────────────────────────────────
@@ -630,7 +675,10 @@ async function loadConversations() {
             else if (item.coachType) btn.classList.add('coach-chat');
             btn.textContent = item.preview;
             btn.dataset.id = item.conversationId;
-            btn.addEventListener('click', () => openConversation(item.conversationId));
+            btn.addEventListener('click', () => {
+                openConversation(item.conversationId);
+                closeDrawers();
+            });
 
             const del = document.createElement('button');
             del.className = 'conversation-delete icon-button';

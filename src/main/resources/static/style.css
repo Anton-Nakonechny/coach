@@ -27,12 +27,13 @@ body {
     color: var(--text-primary);
     line-height: 1.6;
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
 }
 
 .container {
-    height: 100vh;
-    width: 100vw;
+    height: 100%;
+    width: 100%;
     display: flex;
     flex-direction: column;
 }
@@ -478,32 +479,59 @@ header { display: none; }
 .hint-icon:hover::after { content: attr(data-hint); position: absolute; bottom: calc(100% + 6px); right: 0; white-space: nowrap; background: var(--background); color: var(--coach-accent); border: 1px solid var(--coach-accent); border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.8rem; z-index: 10; }
 
 /* Responsive */
-@media (max-width: 768px) {
-    .main-content { flex-direction: column; }
-    .sidebar {
-        width: 100%;
-        border-right: none;
-        border-bottom: 1px solid var(--border-color);
-        padding: 1rem;
-        order: 2;
-        max-height: 45vh;
-    }
-    .chat-main { order: 1; }
-    .coach-panel {
-        width: 100%;
-        order: 3;
-        border-left: none;
-        border-top: 1px solid var(--border-color);
-        padding: 1rem;
-    }
-    .chat-messages { padding: 1rem; }
-    .message { max-width: 90%; }
-    .chat-input-container { padding: 1rem; gap: 0.5rem; }
-}
 
-@media (max-width: 1024px) {
+/* Tablet: narrower fixed rails */
+@media (min-width: 769px) and (max-width: 1024px) {
     .sidebar { width: 280px; }
     .coach-panel { width: 200px; }
+}
+
+/* Phone: full-screen chat, rails become slide-in drawers.
+   Breakpoint must match mobileQuery in script.js. */
+@media (max-width: 768px) {
+    /* Slim top bar — reuses the <header> hidden on desktop */
+    header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border-color);
+        flex-shrink: 0;
+    }
+    header h1 { font-size: 1rem; font-weight: 600; }
+
+    /* Rails become drawers: sidebar slides in from the left, coach panel from the right */
+    .sidebar,
+    .coach-panel {
+        position: fixed;
+        top: 0;
+        bottom: 0;
+        padding: 1rem;
+        z-index: 60;
+    }
+    .sidebar { left: 0; width: min(85vw, 320px); transform: translateX(-100%); }
+    .coach-panel { right: 0; width: min(85vw, 280px); transform: translateX(100%); }
+    .sidebar.open, .coach-panel.open { transform: translateX(0); }
+    /* Animate only after a toggle interaction, so page load and breakpoint
+       crossing never play the slide-out. */
+    .drawer-anim .sidebar, .drawer-anim .coach-panel { transition: transform 0.2s ease; }
+
+    /* Dim backdrop between chat (below) and drawers (above) */
+    .drawer-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.6);
+        z-index: 50;
+    }
+
+    /* Small-screen chat adjustments */
+    .chat-messages { padding: 1rem; }
+    .message { max-width: 90%; }
+    .chat-input-container { padding: 0.75rem 1rem; gap: 0.5rem; }
+    #chatInput { font-size: 1rem; } /* ≥16px prevents iOS focus zoom */
+    .topic-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
 }
 
 /* ── Attachment composer ────────────────────────────────────── */
