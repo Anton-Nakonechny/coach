@@ -60,7 +60,15 @@ history** rebuilt from disk.
   excluded), persists the pick via the sidecar, and every turn resends
   persona + whole scenario file as the `system` prompt. The first user turn is the
   synthetic `OPENING_INSTRUCTION`, stored and displayed like any message. SPANISH
-  is enum + UI only (400 until prompts exist).
+  is enum + UI only (400 until prompts exist). CLAUDE_ARCHITECT uses a topic-grid
+  flow: `GET /api/coaches/claude-architect/topics` returns sorted `.md` stems from
+  `coaches/Claude/`; clicking a topic POSTs with `coachType=claude-architect` and
+  `topic=<stem>` (blank message), storing `CoachMeta(CLAUDE_ARCHITECT, stem+".md",
+  null)`; every turn resends `CLAUDE_PERSONA + topic file` as the system prompt.
+  `QuestionParser.parse()` (D4: ≥5 non-blank lines, last 4 are A–D options in order,
+  no other option lines, ≥1 stem line) populates the `question` field of
+  `ChatResponse` and `MessageItem` (derived at read time, never persisted). The PDF
+  exam guide is gitignored (`coaches/Claude/*.pdf`) and must never be committed.
 - **`web/ChatController`** + `ApiExceptionHandler` — the seven route handlers (`/api/chat`
   has JSON + multipart overloads); the handler maps
   errors to `{"message": ...}` (FastAPI used `{"detail": ...}`) with idiomatic Spring

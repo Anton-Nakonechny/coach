@@ -1850,6 +1850,21 @@ class ChatApiTest {
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
+    // Issue #8: a failed attachment upload must not leave an orphan .meta.json sidecar
+    @Test
+    void spanishChatStart_withDisallowedAttachmentType_leavesNoOrphanSidecar() throws IOException {
+        writeSpanishTopics("Ser y estar");
+
+        var resp = postChatMultipart(spanishBody("Ser y estar", null),
+                List.of(new PartFile("data.bin", "application/octet-stream", new byte[10])));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        long metaCount = Files.exists(CONV_DIR)
+                ? Files.list(CONV_DIR).filter(p -> p.toString().endsWith(".meta.json")).count()
+                : 0L;
+        assertThat(metaCount).isZero();
+    }
+
     // Issue #10: removing a scenario file must not expose internal paths in the 500 response
     @Test
     void coachFollowUp_whenScenarioFileRemoved_returns500WithoutInternalPath() throws IOException {

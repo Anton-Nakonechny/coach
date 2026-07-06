@@ -33,7 +33,10 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 /**
  * HTTP routes — Java port of the FastAPI routes in {@code app.py}.
@@ -111,21 +114,25 @@ public class ChatController {
                 ? request.conversationId()
                 : UUID.randomUUID().toString().replace("-", "");
 
+        CoachMeta newMeta = null;
         if (coach == CoachType.SPANISH) {
             // Validates topic membership — throws 400/500 before any persistence.
-            CoachMeta meta = coachService.startSpanish(request.topic().trim());
-            store.saveCoachMeta(conversationId, meta);
+            newMeta = coachService.startSpanish(request.topic().trim());
             message = coachService.spanishOpeningPrompt(
-                    meta.topic(),
+                    newMeta.topic(),
                     StringUtils.hasText(message) ? message.trim() : null);
         } else if (coach == CoachType.CLAUDE_ARCHITECT) {
-            store.saveCoachMeta(conversationId, coachService.startClaudeArchitect(request.topic().trim()));
+            newMeta = coachService.startClaudeArchitect(request.topic().trim());
         } else if (coach != CoachType.NONE) {
-            store.saveCoachMeta(conversationId, coachService.startCoach(coach));
+            newMeta = coachService.startCoach(coach);
         }
 
+        // Process attachments before writing the sidecar so a rejected file leaves no orphan.
         List<AttachmentBlock> uploaded = attachments.process(files);
-        var meta = store.coachMeta(conversationId);
+        if (newMeta != null)
+            store.saveCoachMeta(conversationId, newMeta);
+        // Reuse the just-built meta on a coach-start turn; continuing turns read it from disk.
+        var meta = newMeta == null ? store.coachMeta(conversationId) : Optional.of(newMeta);
         String system = meta.map(coachService::systemPrompt).orElse(null);
 
         store.appendMessage(conversationId, "user", message, model.value(), effort, uploaded);
@@ -176,18 +183,21 @@ public class ChatController {
                 .map(CoachMeta::coachType)
                 .orElse(CoachType.NONE);
         if (coachType == CoachType.SPANISH)
-            return messages.stream().map(m -> {
-                if (m.role() != Role.ASSISTANT) return m;
-                var s = parseSentences(m.content());
-                return s == null ? m : m.withSentences(s);
-            }).toList();
+            return enrichAssistant(messages, this::parseSentences, MessageItem::withSentences);
         if (coachType == CoachType.CLAUDE_ARCHITECT)
-            return messages.stream().map(m -> {
-                if (m.role() != Role.ASSISTANT) return m;
-                QuizQuestion q = QuestionParser.parse(m.content());
-                return q == null ? m : m.withQuestion(q);
-            }).toList();
+            return enrichAssistant(messages, QuestionParser::parse, MessageItem::withQuestion);
         return messages;
+    }
+
+    private <T> List<MessageItem> enrichAssistant(
+            List<MessageItem> messages,
+            Function<String, T> parse,
+            BiFunction<MessageItem, T, MessageItem> enrich) {
+        return messages.stream().map(m -> {
+            if (m.role() != Role.ASSISTANT) return m;
+            T v = parse.apply(m.content());
+            return v == null ? m : enrich.apply(m, v);
+        }).toList();
     }
 
     private List<SentenceItem> parseSentences(String text) {
