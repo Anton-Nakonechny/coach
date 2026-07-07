@@ -12,10 +12,12 @@ let models = [];
 let effortLevels = [];
 let pendingAttachments = []; // [{id, file, kind, objectUrl?}]
 let conversationCoach = {};  // conversationId -> coachType slug ('none' for plain chats)
-let activeSetup = null;   // null | 'spanish' | 'claude-architect'
+let activeSetup = null;   // null | 'spanish' | 'spanish-words' | 'claude-architect'
 let selectedTopic = null;
 let spanishTopics = null;
 let certTopics = null;
+let spanishMode = 'language';  // 'language' (語) | 'words' (字)
+let pendingMissedWords = null; // word list string for "practice missed" flow
 
 const SPANISH_WELCOME = 'Nuevo chat. Elige un modelo a la izquierda y un tema abajo, e introduce una lista de palabras para practicar.';
 const CLAUDE_WELCOME = 'New chat. Pick a topic below — I will quiz you with exam-style multiple-choice questions and explain every answer.';
@@ -25,7 +27,8 @@ const NEXT_QUESTION = 'Next question.';
 let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
     conversationList, clearAllButton, attachButton, fileInput, attachmentStrip,
     composerError, dropOverlay, coachNote,
-    sidebar, coachPanel, sidebarToggle, coachToggle, drawerBackdrop;
+    sidebar, coachPanel, sidebarToggle, coachToggle, drawerBackdrop,
+    spanishModeToggle;
 
 document.addEventListener('DOMContentLoaded', async () => {
     chatMessages    = document.getElementById('chatMessages');
@@ -44,9 +47,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     coachNote       = document.getElementById('coachNote');
     sidebar         = document.getElementById('sidebar');
     coachPanel      = document.getElementById('coachPanel');
-    sidebarToggle   = document.getElementById('sidebarToggle');
-    coachToggle     = document.getElementById('coachToggle');
-    drawerBackdrop  = document.getElementById('drawerBackdrop');
+    sidebarToggle      = document.getElementById('sidebarToggle');
+    coachToggle        = document.getElementById('coachToggle');
+    drawerBackdrop     = document.getElementById('drawerBackdrop');
+    spanishModeToggle  = document.getElementById('spanishModeToggle');
 
     setupEventListeners();
     setupDragAndDrop();
@@ -89,6 +93,24 @@ function setupEventListeners() {
     // Crossing the breakpoint (rotation, resize) clears drawer state so the
     // desktop layout never inherits a stale .open class or visible backdrop.
     mobileQuery.addEventListener('change', (e) => { if (!e.matches) closeDrawers(); });
+    // 語/字 mode toggle
+    spanishModeToggle.querySelectorAll('.mode-btn').forEach(btn =>
+        btn.addEventListener('click', () => {
+            const mode = btn.dataset.mode;
+            if (mode === spanishMode) return;
+            setSpanishMode(mode);
+            onCoachSelected('spanish');
+        }));
+}
+
+function setSpanishMode(mode) {
+    spanishMode = mode;
+    if (!spanishModeToggle) return;
+    spanishModeToggle.querySelectorAll('.mode-btn').forEach(b => {
+        const active = b.dataset.mode === mode;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-pressed', String(active));
+    });
 }
 
 // ── Mobile drawers ───────────────────────────────────────────
@@ -133,12 +155,18 @@ async function onCoachSelected(value) {
     coachNote.textContent = '';
     activeSetup = null;
     selectedTopic = null;
+    // Show the 語/字 toggle only when the Español radio is selected
+    if (spanishModeToggle) spanishModeToggle.hidden = (value !== 'spanish');
     if (value === 'none') {
         startNewChat();
         return;
     }
     if (value === 'spanish') {
-        enterSpanishSetup();
+        if (spanishMode === 'words') {
+            enterWordsSetup();
+        } else {
+            enterSpanishSetup();
+        }
         return;
     }
     if (value === 'claude-architect') {
@@ -196,6 +224,16 @@ async function enterSpanishSetup() {
         onPick: t => { selectedTopic = t; setActive('.topic-button', 'topic', t); },
     });
     if (topics) spanishTopics = topics;
+}
+
+function enterWordsSetup() {
+    currentConversationId = null;
+    chatMessages.innerHTML = '';
+    highlightActiveConversation();
+    coachNote.textContent = '';
+    pendingMissedWords = null;
+    addMessage('Modo 字 — vocabulario. Escribe o pega palabras en español separadas por comas.', 'assistant');
+    activeSetup = 'spanish-words';
 }
 
 // Render a coach's topic grid, lazily fetching (and returning) its topic list.
@@ -541,6 +579,10 @@ async function sendMessage() {
         composerError.textContent = 'Select a topic first';
         return;
     }
+    if (activeSetup === 'spanish-words') {
+        translateWords(message);
+        return;
+    }
 
     // Snapshot & clear before anything async
     const attachmentsSnapshot = [...pendingAttachments];
@@ -619,6 +661,183 @@ async function sendMessage() {
         chatInput.disabled  = false;
         sendButton.disabled = false;
         attachButton.disabled = false;
+        chatInput.focus();
+    }
+}
+
+// ── 字 word-quiz flow ─────────────────────────────────────────
+
+async function translateWords(words) {
+    if (!words) return;
+    composerError.textContent = '';
+    chatInput.value = '';
+    autoResize();
+    chatInput.disabled = true;
+    sendButton.disabled = true;
+    attachButton.disabled = true;
+
+    addMessage(words, 'user');
+    const loadingMessage = createLoadingMessage();
+    chatMessages.appendChild(loadingMessage);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    try {
+        const resp = await fetch(`${API_URL}/spanish/words/translate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ words, model: currentModel, effort: currentEffort }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.message || 'Error translating words');
+        loadingMessage.remove();
+        activeSetup = null;
+        buildWordCheck(data.setId, data.items);
+    } catch (err) {
+        loadingMessage.remove();
+        addMessage(`Error: ${err.message}`, 'assistant');
+    } finally {
+        chatInput.disabled = false;
+        sendButton.disabled = false;
+        attachButton.disabled = false;
+        chatInput.focus();
+    }
+}
+
+function buildWordCheck(setId, items) {
+    const container = document.createElement('div');
+    container.className = 'word-check';
+
+    const rows = items.map(item => {
+        const row = document.createElement('div');
+        row.className = 'word-row';
+
+        const english = document.createElement('span');
+        english.className = 'word-english';
+        english.textContent = item.english;
+
+        const hint = document.createElement('span');
+        hint.className = 'hint-icon';
+        hint.dataset.hint = item.hint;
+        hint.textContent = '?';
+        hint.title = item.hint;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'word-answer';
+        input.placeholder = 'español…';
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); checkWords(setId, rows); }
+        });
+
+        row.appendChild(english);
+        row.appendChild(hint);
+        row.appendChild(input);
+        return row;
+    });
+    rows.forEach(r => container.appendChild(r));
+
+    const checkBtn = document.createElement('button');
+    checkBtn.className = 'topic-button';
+    checkBtn.textContent = 'Comprobar ✓';
+    checkBtn.style.alignSelf = 'flex-start';
+    checkBtn.addEventListener('click', () => checkWords(setId, rows));
+    container.appendChild(checkBtn);
+
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'message assistant';
+    const inner = document.createElement('div');
+    inner.className = 'message-content';
+    inner.appendChild(container);
+    msgDiv.appendChild(inner);
+    chatMessages.appendChild(msgDiv);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (rows.length > 0) rows[0].querySelector('.word-answer').focus();
+}
+
+async function checkWords(setId, rows) {
+    const answers = rows.map(r => r.querySelector('.word-answer').value);
+    rows.forEach(r => { r.querySelector('.word-answer').disabled = true; });
+
+    try {
+        const resp = await fetch(`${API_URL}/spanish/words/check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ setId, answers }),
+        });
+        if (resp.status === 404) {
+            addMessage('El conjunto de palabras ha expirado. Vuelve a introducir las palabras.', 'assistant');
+            rows.forEach(r => { r.querySelector('.word-answer').disabled = false; });
+            activeSetup = 'spanish-words';
+            return;
+        }
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.message || 'Error checking answers');
+
+        const missed = [];
+        data.results.forEach((result, i) => {
+            const row = rows[i];
+            if (!row) return;
+            row.classList.add(result.correct ? 'correct' : 'incorrect');
+
+            const grade = document.createElement('span');
+            grade.className = 'word-grade';
+            grade.textContent = result.correct ? '✓' : '✗';
+            row.appendChild(grade);
+
+            if (!result.correct) {
+                const reveal = document.createElement('span');
+                reveal.className = 'word-spanish-reveal';
+                reveal.textContent = result.spanish;
+                row.appendChild(reveal);
+                missed.push(result.spanish);
+            }
+        });
+
+        if (missed.length > 0) {
+            const practiceBtn = document.createElement('button');
+            practiceBtn.className = 'topic-button';
+            practiceBtn.style.marginTop = '0.5rem';
+            practiceBtn.textContent = `Practicar las ${missed.length} fallada${missed.length === 1 ? '' : 's'} en modo 語`;
+            practiceBtn.addEventListener('click', () => practiceMissed(missed));
+            const container = rows[0].closest('.word-check');
+            if (container) container.appendChild(practiceBtn);
+        }
+    } catch (err) {
+        addMessage(`Error: ${err.message}`, 'assistant');
+        rows.forEach(r => { r.querySelector('.word-answer').disabled = false; });
+    }
+}
+
+async function practiceMissed(words) {
+    const wordStr = words.join(', ');
+    chatInput.disabled = true;
+    sendButton.disabled = true;
+    const loadingMessage = createLoadingMessage();
+    chatMessages.appendChild(loadingMessage);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    try {
+        const resp = await fetch(`${API_URL}/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: wordStr,
+                model: currentModel,
+                effort: currentEffort,
+                coachType: 'spanish',
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.message || 'Failed to start practice');
+        loadingMessage.remove();
+        await loadConversations();
+        await openConversation(data.conversationId);
+        setSpanishMode('language');  // switch toggle back to 語
+    } catch (err) {
+        loadingMessage.remove();
+        addMessage(`Error: ${err.message}`, 'assistant');
+    } finally {
+        chatInput.disabled = false;
+        sendButton.disabled = false;
         chatInput.focus();
     }
 }
@@ -789,11 +1008,13 @@ function activateQuiz() {
 function startNewChat() {
     activeSetup = null;
     selectedTopic = null;
+    pendingMissedWords = null;
     currentConversationId = null;
     chatMessages.innerHTML = '';
     addMessage("New chat. Pick a model on the left and ask me anything.", 'assistant');
     highlightActiveConversation();
     setCoachRadio('none');
+    if (spanishModeToggle) spanishModeToggle.hidden = true;
     coachNote.textContent = '';
     chatInput.focus();
 }

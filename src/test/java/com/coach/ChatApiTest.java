@@ -1336,17 +1336,15 @@ class ChatApiTest {
 
     @Test
     void spanishChatWithoutTopicReturns400() throws IOException {
-        writeSpanishTopics("Ser y estar");
+        // Topic-less Spanish chat is now valid — used for 字 word-list seeding into a 語 session.
+        queueText("(caber) I'm surprised.\n(pala) The shovel.");
 
-        var body = spanishBody(null, "caber");
+        var body = spanishBody(null, "caber, pala");
         var resp = postChat(body);
 
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(json(resp).get("message").asText()).contains("topic");
-        try (var paths = Files.list(CONV_DIR)) {
-            assertThat(paths.toList()).isEmpty();
-        }
-        assertThat(gatewayCalls).isEmpty();
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(resp).get("conversationId").asText()).isNotBlank();
+        assertThat(gatewayCalls).hasSize(1);
     }
 
     @Test
@@ -1895,5 +1893,151 @@ class ChatApiTest {
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
         String message = json(resp).get("message").asText();
         assertThat(message).doesNotContain(COACHES_DIR.toString());
+    }
+
+    // ----------------------------------------------------------------------- //
+    // 字 word-quiz mode — ephemeral translate → check, no JSONL persistence
+    // ----------------------------------------------------------------------- //
+
+    private ResponseEntity<String> postTranslate(Map<String, Object> body) {
+        return rest.postForEntity(url("/api/spanish/words/translate"), body, String.class);
+    }
+
+    private ResponseEntity<String> postCheck(Map<String, Object> body) {
+        return rest.postForEntity(url("/api/spanish/words/check"), body, String.class);
+    }
+
+    @Test
+    void spanishWordsTranslate_happyPath_returnsSetIdAndItems() {
+        queueText("(caber en) fit\n(cabar) dig\n(pala) shovel\n(cráneo) skull");
+
+        var resp = postTranslate(Map.of("words", "caber en, cabar, pala, cráneo"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode node = json(resp);
+        assertThat(node.get("setId").asText()).isNotBlank();
+        assertThat(node.get("items")).hasSize(4);
+
+        // All four english values present (order varies due to shuffle)
+        List<String> englishList = new ArrayList<>();
+        node.get("items").forEach(item -> englishList.add(item.get("english").asText()));
+        assertThat(englishList).containsExactlyInAnyOrder("fit", "dig", "shovel", "skull");
+
+        // Hints: first non-space char kept; rest replaced with · (U+00B7); spaces preserved
+        Map<String, String> expectedHint = Map.of(
+                "fit",    "c···· ··",   // caber en
+                "dig",    "c····",                  // cabar
+                "shovel", "p···",                        // pala
+                "skull",  "c·····");           // cráneo
+        node.get("items").forEach(item -> {
+            String eng = item.get("english").asText();
+            assertThat(item.get("hint").asText()).isEqualTo(expectedHint.get(eng));
+        });
+
+        assertThat(gatewayCalls).hasSize(1);
+    }
+
+    @Test
+    void spanishWordsCheck_lenientGrading_flagsCorrectAndWrong() {
+        queueText("(caber en) fit\n(cabar) dig\n(pala) shovel\n(cráneo) skull");
+        var translateResp = json(postTranslate(Map.of("words", "caber en, cabar, pala, cráneo")));
+        String setId = translateResp.get("setId").asText();
+
+        // Build answers in the shuffled order the translate response returned
+        Map<String, String> answerByEnglish = new HashMap<>();
+        answerByEnglish.put("fit",    "caber en");  // exact match → correct
+        answerByEnglish.put("dig",    "wrong");      // deliberate miss → incorrect
+        answerByEnglish.put("shovel", "PALA");       // case-insensitive → correct
+        answerByEnglish.put("skull",  "CRANEO");     // accent-insensitive → correct
+        List<String> answers = new ArrayList<>();
+        for (JsonNode item : translateResp.get("items"))
+            answers.add(answerByEnglish.getOrDefault(item.get("english").asText(), ""));
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", setId);
+        checkBody.put("answers", answers);
+        var checkResp = json(postCheck(checkBody));
+
+        assertThat(checkResp.get("results")).hasSize(4);
+        long correctCount = 0;
+        for (JsonNode result : checkResp.get("results")) {
+            if (result.get("correct").asBoolean()) correctCount++;
+            assertThat(result.get("spanish").asText()).isNotBlank();  // original revealed
+        }
+        assertThat(correctCount).isEqualTo(3);
+        assertThat(gatewayCalls).hasSize(1);  // no extra gateway call for check
+    }
+
+    @Test
+    void spanishWordsCheck_withExpiredSetId_returns404() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("setId", "nonexistentsetid000");
+        body.put("answers", List.of());
+
+        var resp = postCheck(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(json(resp).get("message").asText()).contains("expired");
+    }
+
+    @Test
+    void spanishWordsCheck_isEphemeral_leavesNoConversationFiles() throws IOException {
+        queueText("(cráneo) skull\n(pala) shovel");
+        var translateResp = json(postTranslate(Map.of("words", "cráneo, pala")));
+        String setId = translateResp.get("setId").asText();
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("setId", setId);
+        body.put("answers", List.of("cráneo", "pala"));
+        postCheck(body);
+
+        // No JSONL or meta.json files — the quiz is entirely ephemeral
+        if (Files.exists(CONV_DIR)) {
+            try (var paths = Files.list(CONV_DIR)) {
+                assertThat(paths
+                        .filter(p -> p.toString().endsWith(".jsonl")
+                                || p.toString().endsWith(".meta.json"))
+                        .toList()).isEmpty();
+            }
+        }
+        assertThat(json(rest.getForEntity(url("/api/conversations"), String.class))).isEmpty();
+    }
+
+    @Test
+    void spanishWordsTranslate_withBlankWords_returns400() {
+        var resp = postTranslate(Map.of("words", "   "));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void spanishWordsTranslate_withUnparseableOutput_returns500() {
+        queueText("This is just prose that does not match the format at all.");
+
+        var resp = postTranslate(Map.of("words", "caber, pala"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).containsIgnoringCase("parse");
+    }
+
+    @Test
+    void spanishChatWithoutTopic_wordsSeed_persistsAndSystemHasNoTema() throws IOException {
+        queueText("(cráneo) Use this skull.\n(pala) The shovel is big.");
+
+        var resp = postChat(spanishBody(null, "cráneo, pala"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode node = json(resp);
+        assertThat(node.get("sentences").isArray()).isTrue();
+
+        // Conversation is persisted
+        String cid = node.get("conversationId").asText();
+        assertThat(Files.exists(CONV_DIR.resolve(cid + ".jsonl"))).isTrue();
+
+        // System prompt has the tutor but no "Tema de práctica" clause
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("tutor de español");
+        assertThat(call.system()).doesNotContain("Tema de práctica");
     }
 }
