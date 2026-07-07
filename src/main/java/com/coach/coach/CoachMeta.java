@@ -9,7 +9,8 @@ public record CoachMeta(CoachType coachType, String promptFile, String topic) {
     public String preview() {
         String stem = promptFile != null ? promptFile.replaceFirst("(?i)\\.md$", "") : "";
         String suffix = switch (coachType) {
-            case SPANISH -> topic;
+            // A topic-less Spanish chat (字 word-list practice) has no topic to show.
+            case SPANISH -> topic == null || topic.isBlank() ? "Vocabulario" : topic;
             case CLAUDE_ARCHITECT -> stem;
             default -> stem.replaceFirst("^\\d+-", "").replace('-', ' ');
         };
