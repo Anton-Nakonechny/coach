@@ -717,6 +717,8 @@ function buildWordCheck(setId, items) {
     const container = document.createElement('div');
     container.className = 'word-check';
 
+    const inputMinWidth = `${Math.max(...items.map(i => i.spanish.length)) + 5}ch`;
+
     const rows = items.map(item => {
         const row = document.createElement('div');
         row.className = 'word-row';
@@ -743,6 +745,7 @@ function buildWordCheck(setId, items) {
         input.type = 'text';
         input.className = 'word-answer';
         input.placeholder = 'español…';
+        input.style.minWidth = inputMinWidth;
         input.addEventListener('keydown', e => {
             if (e.key === 'Enter') { e.preventDefault(); checkWords(setId, rows); }
         });
