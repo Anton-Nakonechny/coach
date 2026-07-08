@@ -1,13 +1,15 @@
 const { defineConfig } = require('@playwright/test');
 
+const port = process.env.TEST_PORT || 9999;
+
 module.exports = defineConfig({
     testDir: './e2e',
     use: {
-        baseURL: 'http://localhost:9999',
+        baseURL: `http://localhost:${port}`,
     },
     webServer: {
-        command: 'mvn spring-boot:run -q',
-        url: 'http://localhost:9999/api/models',
+        command: `SERVER_PORT=${port} mvn spring-boot:run -q`,
+        url: `http://localhost:${port}/api/models`,
         reuseExistingServer: true,
         timeout: 60_000,
     },

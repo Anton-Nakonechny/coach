@@ -989,7 +989,8 @@ function buildSentenceCards(sentences) {
     container.addEventListener('click', e => {
         const card = e.target.closest('.sentence-card');
         if (!card) return;
-        chatInput.value += '\n' + card.dataset.sentence + '\n';
+        const sep = chatInput.value.trimEnd() ? '\n' : '';
+        chatInput.value = chatInput.value.trimEnd() + sep + card.dataset.sentence;
         autoResize();
         chatInput.focus();
     });
