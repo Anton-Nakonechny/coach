@@ -572,8 +572,11 @@ function insertNewlineAtCursor() {
 }
 
 function autoResize() {
+    const before = chatInput.offsetHeight;
     chatInput.style.height = 'auto';
     chatInput.style.height = `${chatInput.scrollHeight}px`;
+    const delta = chatInput.offsetHeight - before;
+    if (delta > 0) chatMessages.scrollTop += delta;
 }
 
 // ── Send ─────────────────────────────────────────────────────
