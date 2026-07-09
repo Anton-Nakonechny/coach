@@ -2207,4 +2207,10 @@ class ChatApiTest {
         var css = rest.getForObject(url("/style.css"), String.class);
         assertThat(css).contains("[data-tooltip]");
     }
+
+    @Test
+    void scriptJs_sentenceCardClick_appendsTrailingNewline() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js).contains("card.dataset.sentence + '\\n'");
+    }
 }
