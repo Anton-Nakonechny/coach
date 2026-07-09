@@ -2135,6 +2135,47 @@ class ChatApiTest {
     }
 
     @Test
+    void spanishWordsTranslate_stripsSurroundingParentheses() {
+        // Each entry wrapped in parens; stored original and LLM input must be unwrapped.
+        queueText("(fundirse el dinero) to blow all one's money\n(bahía) bay");
+
+        var resp = json(postTranslate(Map.of("words", "(fundirse el dinero)\n(bahía)")));
+
+        Map<String, String> spanishByEnglish = new HashMap<>();
+        for (JsonNode item : resp.get("items"))
+            spanishByEnglish.put(item.get("english").asText(), item.get("spanish").asText());
+        assertThat(spanishByEnglish.get("to blow all one's money")).isEqualTo("fundirse el dinero");
+        assertThat(spanishByEnglish.get("bay")).isEqualTo("bahía");
+
+        // The LLM receives the clean tokens — no parentheses.
+        assertThat(textOf(gatewayCalls.get(0).messages().get(0)))
+                .isEqualTo("fundirse el dinero\nbahía");
+    }
+
+    @Test
+    void spanishWordsCheck_parenthesisedInput_gradesCleanAnswerCorrect() {
+        queueText("(fundirse el dinero) to blow all one's money\n(astutos) cunning");
+        var t = json(postTranslate(Map.of("words", "(fundirse el dinero)\n(astutos)")));
+
+        Map<String, String> ans = Map.of(
+                "to blow all one's money", "fundirse el dinero",
+                "cunning", "astutos");
+        List<String> answers = new ArrayList<>();
+        for (JsonNode item : t.get("items"))
+            answers.add(ans.get(item.get("english").asText()));
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("setId", t.get("setId").asText());
+        body.put("answers", answers);
+        var check = json(postCheck(body));
+
+        long correct = 0;
+        for (JsonNode r : check.get("results"))
+            if (r.get("correct").asBoolean()) correct++;
+        assertThat(correct).isEqualTo(2);
+    }
+
+    @Test
     void spanishChatWithoutTopic_wordsSeed_persistsAndSystemHasNoTema() throws IOException {
         queueText("(cráneo) Use this skull.\n(pala) The shovel is big.");
 

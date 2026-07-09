@@ -74,7 +74,7 @@ history** rebuilt from disk.
   provides `normalizeKey` (NFD + strip diacritics + lowercase + trim). SPANISH with
   blank/null topic → `startSpanish(null)` → `CoachMeta(SPANISH, null, null)`,
   system prompt = `SPANISH_PERSONA` only (no topic clause). `parseWordList` splits
-  on commas/newlines (dash-comment stripped per line before the comma split), trims.
+  on commas/newlines (dash-comment stripped per line before the comma split), trims, then strips leading/trailing non-letter chars from each entry (so wrapping `( )`, quotes, or list numbering don't leak into the stored word or grading).
   `maskHint` reveals the first `ceil(len/4)` chars of each word, masks the rest with
   `·` (U+00B7), preserves spaces. `pairTranslations` calls `SentenceParser`
   on the LLM output and matches echoed español back to the original tokens via
