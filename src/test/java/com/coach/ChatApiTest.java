@@ -2194,4 +2194,17 @@ class ChatApiTest {
         assertThat(call.system()).contains("tutor de español");
         assertThat(call.system()).doesNotContain("Tema de práctica");
     }
+
+    @Test
+    void indexHtml_modeButtons_haveTooltipAttributes() {
+        var html = rest.getForObject(url("/index.html"), String.class);
+        assertThat(html).contains("data-tooltip=\"language mode\"");
+        assertThat(html).contains("data-tooltip=\"words mode\"");
+    }
+
+    @Test
+    void styleCss_containsTooltipRule() {
+        var css = rest.getForObject(url("/style.css"), String.class);
+        assertThat(css).contains("[data-tooltip]");
+    }
 }

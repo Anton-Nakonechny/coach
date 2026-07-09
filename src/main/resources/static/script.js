@@ -22,6 +22,7 @@ let pendingMissedWords = null; // word list string for "practice missed" flow
 const SPANISH_WELCOME = 'Nuevo chat. Elige un modelo a la izquierda y un tema abajo, e introduce una lista de palabras para practicar.';
 const CLAUDE_WELCOME = 'New chat. Pick a topic below — I will quiz you with exam-style multiple-choice questions and explain every answer.';
 const NEXT_QUESTION = 'Next question.';
+const GLYPH_LABELS = { '語': 'language mode', '字': 'words mode' };
 
 // DOM elements
 let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
@@ -116,7 +117,7 @@ function hintsFromOpenChat() {
     const seen = new Set();
     const words = [];
     for (const part of [...blocks[blocks.length - 1].querySelectorAll('.hint-icon')]
-        .flatMap(icon => (icon.dataset.hint || '').split(','))) {
+        .flatMap(icon => (icon.dataset.tooltip || '').split(','))) {
         const word = part.trim();
         const key = word.toLowerCase();
         if (word && !seen.has(key)) { seen.add(key); words.push(word); }
@@ -261,7 +262,7 @@ function resetToSetup() {
 function enterWordsSetup() {
     resetToSetup();
     pendingMissedWords = null;
-    addMessage('Modo 字 — vocabulario. Escribe o pega palabras en español separadas por comas.', 'assistant');
+    addMessage(`Modo <span data-tooltip="${GLYPH_LABELS['字']}">字</span> — vocabulario. Escribe o pega palabras en español separadas por comas.`, 'assistant');
     activeSetup = 'spanish-words';
 }
 
@@ -748,13 +749,13 @@ function buildWordCheck(setId, items) {
 
         const hint = document.createElement('span');
         hint.className = 'hint-icon';
-        hint.dataset.hint = item.hint;
+        hint.dataset.tooltip = item.hint;
         hint.textContent = '?';
         hint.title = item.hint;
         // Clicking escalates the partial hint to the full word (a "full hint"), pins the
         // tooltip, and flags the row so the grade counts it as yellow even when correct.
         hint.addEventListener('click', () => {
-            hint.dataset.hint = item.spanish;
+            hint.dataset.tooltip = item.spanish;
             hint.title = item.spanish;
             hint.classList.add('revealed');
             row.dataset.fullHint = 'true';
@@ -847,7 +848,7 @@ async function checkWords(setId, rows, checkBtn) {
         }
         const again = document.createElement('button');
         again.className = 'topic-button';
-        again.textContent = 'De nuevo 字';
+        again.innerHTML = `De nuevo <span data-tooltip="${GLYPH_LABELS['字']}">字</span>`;
         again.addEventListener('click', () => retryMissedInWords(all));
         actions.appendChild(again);
         if (checkBtn) checkBtn.hidden = true;
@@ -863,9 +864,10 @@ async function checkWords(setId, rows, checkBtn) {
 function missedButton(missed, glyph, onClick) {
     const btn = document.createElement('button');
     btn.className = 'topic-button';
-    btn.textContent = missed.length === 1
-        ? `Practicar la falla en modo ${glyph}`
-        : `Practicar las ${missed.length} fallas en modo ${glyph}`;
+    const prefix = missed.length === 1
+        ? 'Practicar la falla en modo '
+        : `Practicar las ${missed.length} fallas en modo `;
+    btn.innerHTML = `${prefix}<span data-tooltip="${GLYPH_LABELS[glyph] || ''}">${glyph}</span>`;
     btn.addEventListener('click', onClick);
     return btn;
 }
@@ -1022,7 +1024,7 @@ function buildSentenceCards(sentences) {
 
         const hintIcon = document.createElement('span');
         hintIcon.className = 'hint-icon';
-        hintIcon.setAttribute('data-hint', hint);
+        hintIcon.setAttribute('data-tooltip', hint);
         hintIcon.textContent = '?';
 
         card.appendChild(text);

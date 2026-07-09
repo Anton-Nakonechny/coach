@@ -488,10 +488,34 @@ header { display: none; }
 
 /* ── 語/字 mode toggle ───────────────────────────────────────── */
 
-.mode-toggle { display: inline-flex; border: 1px solid var(--coach-accent); border-radius: 8px; overflow: hidden; margin-left: 0.5rem; vertical-align: middle; }
+.mode-toggle { display: inline-flex; border: 1px solid var(--coach-accent); border-radius: 8px; margin-left: 0.5rem; vertical-align: middle; }
 .mode-btn { padding: 0.2rem 0.5rem; font-size: 0.85rem; background: transparent; color: var(--coach-accent); border: none; cursor: pointer; line-height: 1.4; }
+.mode-btn:first-child { border-radius: 7px 0 0 7px; }
+.mode-btn:last-child  { border-radius: 0 7px 7px 0; }
 .mode-btn.active { background: var(--coach-accent); color: #fff; }
 .mode-btn:focus-visible { outline: 2px solid var(--coach-accent); outline-offset: -2px; }
+
+/* ── Tooltip helper ─────────────────────────────────────────── */
+[data-tooltip] { position: relative; }
+[data-tooltip]:hover::after,
+.hint-icon.revealed::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    background: var(--background);
+    color: var(--coach-accent);
+    border: 1px solid var(--coach-accent);
+    border-radius: 6px;
+    padding: 0.25rem 0.6rem;
+    font-size: 0.8rem;
+    z-index: 100;
+    pointer-events: none;
+}
+.hint-icon[data-tooltip]:hover::after,
+.hint-icon.revealed::after { left: auto; transform: none; right: 0; }
 
 /* ── Spanish sentence cards ─────────────────────────────────── */
 
@@ -499,7 +523,6 @@ header { display: none; }
 .sentence-card { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.6rem 0.8rem; background: var(--surface); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer; }
 .sentence-card:hover { background: var(--surface-hover); }
 .hint-icon { position: relative; flex-shrink: 0; width: 1.4rem; height: 1.4rem; display: flex; align-items: center; justify-content: center; border: 1px solid var(--coach-accent); border-radius: 50%; color: var(--coach-accent); font-size: 0.8rem; cursor: pointer; }
-.hint-icon:hover::after, .hint-icon.revealed::after { content: attr(data-hint); position: absolute; bottom: calc(100% + 6px); right: 0; white-space: nowrap; background: var(--background); color: var(--coach-accent); border: 1px solid var(--coach-accent); border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.8rem; z-index: 10; }
 .hint-icon.revealed { background: var(--coach-accent); color: #fff; }
 
 /* ── 字 word-quiz rows ───────────────────────────────────────── */
