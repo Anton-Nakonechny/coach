@@ -110,6 +110,20 @@ function setSpanishMode(mode) {
 // Flip 語↔字. Clicking the chip also selects the Español coach. Right after word
 // feedback, the flip re-drills the missed words — into 語 sentence practice or a fresh
 // 字 quiz — the same outcome as the two in-dialog buttons.
+function hintsFromOpenChat() {
+    const blocks = chatMessages.querySelectorAll('.sentence-cards');
+    if (!blocks.length) return [];
+    const seen = new Set();
+    const words = [];
+    for (const part of [...blocks[blocks.length - 1].querySelectorAll('.hint-icon')]
+        .flatMap(icon => (icon.dataset.hint || '').split(','))) {
+        const word = part.trim();
+        const key = word.toLowerCase();
+        if (word && !seen.has(key)) { seen.add(key); words.push(word); }
+    }
+    return words;
+}
+
 function switchSpanishMode() {
     setCoachRadio('spanish');
     const next = spanishMode === 'words' ? 'language' : 'words';
@@ -117,9 +131,11 @@ function switchSpanishMode() {
     if (pendingMissedWords && pendingMissedWords.length) {
         if (next === 'language') practiceMissed(pendingMissedWords);
         else retryMissedInWords(pendingMissedWords);
-    } else {
-        onCoachSelected('spanish');
+        return;
     }
+    const hints = next === 'words' ? hintsFromOpenChat() : [];
+    if (hints.length) retryMissedInWords(hints);
+    else onCoachSelected('spanish');
 }
 
 // ── Mobile drawers ───────────────────────────────────────────
