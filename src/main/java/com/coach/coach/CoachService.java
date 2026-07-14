@@ -1,6 +1,7 @@
 package com.coach.coach;
 
 import com.coach.config.AppConfig;
+import com.coach.docs.DocsService;
 import com.coach.model.CoachType;
 import com.coach.web.InvalidRequestException;
 import com.coach.web.dto.SentenceItem;
@@ -92,9 +93,11 @@ public class CoachService {
             structure (headings, bold, lists) is fine for task briefs and feedback.""";
 
     private final Path coachesDir;
+    private final DocsService docsService;
 
-    public CoachService(AppConfig config) {
+    public CoachService(AppConfig config, DocsService docsService) {
         this.coachesDir = Path.of(config.coachesDir());
+        this.docsService = docsService;
     }
 
     private static final String SPANISH_PERSONA = """
@@ -225,7 +228,10 @@ public class CoachService {
                     "No file-based persona for coach " + meta.coachType());
         };
         try {
-            return persona + "\n\n" + Files.readString(scenario);
+            String scenarioText = Files.readString(scenario);
+            if (meta.coachType() == CoachType.CLAUDE_ARCHITECT)
+                scenarioText = docsService.withOfficialDocs(scenarioText);
+            return persona + "\n\n" + scenarioText;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

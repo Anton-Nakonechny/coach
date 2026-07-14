@@ -2,6 +2,7 @@ package com.coach.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -12,6 +13,7 @@ import java.util.List;
  * @param conversationsDir directory holding per-conversation JSONL files.
  * @param coachesDir       root folder of coach scenario prompts (one subfolder per coach).
  * @param upload           file-attachment limits.
+ * @param docs             official-documentation grounding settings.
  */
 @ConfigurationProperties(prefix = "coach")
 public record AppConfig(
@@ -19,8 +21,22 @@ public record AppConfig(
         int maxTokens,
         String conversationsDir,
         String coachesDir,
-        Upload upload
+        Upload upload,
+        Docs docs
 ) {
+
+    /**
+     * Official-doc grounding settings (bound from {@code coach.docs.*}).
+     *
+     * @param cacheDir directory holding fetched doc-page snapshots (gitignored).
+     * @param ttl      snapshot freshness window before a refetch.
+     * @param maxChars cap on the total documentation section appended to a system prompt.
+     */
+    public record Docs(
+            String cacheDir,
+            Duration ttl,
+            int maxChars
+    ) { }
 
     /**
      * Attachment limits (bound from {@code coach.upload.*}).
