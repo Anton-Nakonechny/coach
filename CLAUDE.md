@@ -63,6 +63,22 @@ history** rebuilt from disk.
   `coach.docs.ttl` freshness; resolution order is fresh snapshot → fetch &
   snapshot → stale snapshot → skip, so the quiz degrades to blueprint-only
   instead of failing. `DocFetchGateway` is the third `@MockitoBean` boundary.
+- **`mcp/McpServerConfig` + `mcp/ClaudeQuizPrompt`** — MCP server (Streamable HTTP,
+  MCP Java SDK `mcp-core` + `mcp-json-jackson2`) at `POST /mcp`: a plain servlet
+  registered at the exact mapping, so REST routes are untouched. Exposes one MCP
+  prompt, `claude-architect-quiz(topic)` (topic argument completable from
+  `claudeTopics()`); `prompts/get` returns the same `CLAUDE_PERSONA` + topic file +
+  official-docs text `systemPrompt()` builds for the web chat, as a single
+  user-role message — the MCP host (e.g. Claude Code after
+  `claude mcp add --transport http coach http://localhost:9999/mcp`) owns the
+  conversation and the LLM call; this path never touches the Anthropic gateways or
+  persistence. Prompts only by design: no MCP tools, and no MCP resources so the
+  gitignored exam PDF and doc snapshots stay unreachable. The topic value is
+  quote-stripped and resolved by unique case-insensitive fragment (Claude Code
+  splits slash-command args on whitespace and passes only the first token);
+  unknown/missing/ambiguous topic → JSON-RPC `-32602`. `McpApiTest` covers it
+  black-box (initialize handshake mints
+  an `mcp-session-id` header; later JSON-RPC responses arrive as SSE `data:` lines).
 - **`store/ConversationStore`** — JSON-Lines persistence: one
   `<conversations-dir>/<id>.jsonl` per conversation. Soft-delete archives one file
   to gzip or all of them to a single timestamped zip under `archive/`. A coach
