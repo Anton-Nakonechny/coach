@@ -263,6 +263,50 @@ class McpApiTest {
         assertThat(CONV_DIR.toFile().list()).isEmpty();
     }
 
+    // ── Direct the quiz's first question at a random topic bullet ──────────── //
+
+    private static final List<String> QUIZ_BULLETS = List.of(
+            "Detecting stop reasons in the agentic loop.",
+            "Continuing after tool_use turns.",
+            "Bounding iteration count per task.");
+
+    /** A topic blueprint whose only {@code - } lines are the three known bullets. */
+    private static final String BULLETED_BLUEPRINT = """
+            # 1.1 Agentic loops
+
+            Test knowledge of:
+            - Detecting stop reasons in the agentic loop.
+            - Continuing after tool_use turns.
+
+            Test skills in:
+            - Bounding iteration count per task.
+            """;
+
+    @Test
+    void promptsGet_topicWithBullets_endsWithOpeningInstructionTargetingOneBullet() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", BULLETED_BLUEPRINT);
+        var sessionId = initializeSession();
+
+        var message = mcpCall(sessionId, 2, "prompts/get", """
+                {"name":"claude-architect-quiz","arguments":{"topic":"1.1 Agentic loops"}}""");
+
+        var text = message.path("result").path("messages").get(0).path("content").path("text").asText();
+        assertThat(text).contains("Ask me the first exam question.");
+        assertThat(QUIZ_BULLETS).filteredOn(text::endsWith).hasSize(1);
+    }
+
+    @Test
+    void promptsGet_topicWithoutBullets_endsWithPlainOpeningInstruction() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "STOP_REASON DRILL");
+        var sessionId = initializeSession();
+
+        var message = mcpCall(sessionId, 2, "prompts/get", """
+                {"name":"claude-architect-quiz","arguments":{"topic":"1.1 Agentic loops"}}""");
+
+        var text = message.path("result").path("messages").get(0).path("content").path("text").asText();
+        assertThat(text).endsWith("Ask me the first exam question.");
+    }
+
     // ── Cycle 3: JSON-RPC errors + docs degrade path ───────────────────────── //
 
     @Test

@@ -38,6 +38,10 @@ public class CoachService {
     /** The synthetic first user turn of a Claude Architect quiz chat. */
     public static final String CLAUDE_OPENING_INSTRUCTION = "Ask me the first exam question.";
 
+    /** Opening turn directing the first question at one topic bullet: {@code %s} = bullet. */
+    private static final String CLAUDE_OPENING_WITH_BULLET =
+            CLAUDE_OPENING_INSTRUCTION + " Base it on this aspect of the topic:\n%s";
+
     private static final String CLAUDE_PERSONA = """
             You are an exam coach preparing a student for the "Claude Certified Architect –
             Foundations" certification. You quiz the student with realistic exam-style
@@ -161,6 +165,22 @@ public class CoachService {
     }
 
     /**
+     * Opening user turn for a new Claude Architect quiz: the plain instruction plus a
+     * randomly chosen {@code - } bullet of the topic file, so first questions spread
+     * over the whole blueprint instead of converging on the model's modal pick.
+     * Topics without bullets fall back to the plain instruction.
+     */
+    public String claudeOpeningInstruction(CoachMeta meta) {
+        var bullets = readTopicLines(scenarioPath(meta)).stream()
+                .filter(line -> line.startsWith("- "))
+                .map(line -> line.substring(2).strip())
+                .toList();
+        if (bullets.isEmpty()) return CLAUDE_OPENING_INSTRUCTION;
+        return format(CLAUDE_OPENING_WITH_BULLET,
+                bullets.get(ThreadLocalRandom.current().nextInt(bullets.size())));
+    }
+
+    /**
      * Opening practice prompt when words are typed in. {@code %s} = optional topic clause
      * (e.g. {@code " «Ser y estar»"} or {@code ""} for topic-less), then the word list.
      */
@@ -215,9 +235,7 @@ public class CoachService {
             return meta.topic() == null
                     ? SPANISH_PERSONA
                     : SPANISH_PERSONA + "\n\nTema de práctica: " + meta.topic();
-        // Basename guard: the stored filename must never escape the coach folder.
-        String safe = Path.of(meta.promptFile()).getFileName().toString();
-        Path scenario = coachDir(meta.coachType()).resolve(safe);
+        Path scenario = scenarioPath(meta);
         if (!Files.isRegularFile(scenario))
             throw new IllegalStateException("The coach scenario for this conversation is no longer available.");
         var persona = switch (meta.coachType()) {
@@ -234,6 +252,12 @@ public class CoachService {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /** The meta's scenario file; the basename guard keeps it inside the coach folder. */
+    private Path scenarioPath(CoachMeta meta) {
+        String safe = Path.of(meta.promptFile()).getFileName().toString();
+        return coachDir(meta.coachType()).resolve(safe);
     }
 
     /**

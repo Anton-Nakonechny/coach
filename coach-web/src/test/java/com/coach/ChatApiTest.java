@@ -46,6 +46,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -1219,6 +1220,60 @@ class ChatApiTest {
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
         assertThat(CONV_DIR.toFile().list()).isEmpty();
         assertThat(gatewayCalls).isEmpty();
+    }
+
+    // ── Direct each new quiz's first question at a random topic bullet ── //
+
+    private static final List<String> QUIZ_BULLETS = List.of(
+            "MCP server scoping: project-level vs user-level.",
+            "Environment variable expansion in .mcp.json for credential management.",
+            "Simultaneous tool discovery at connection time.",
+            "Configuring shared MCP servers with token expansion.",
+            "Exposing content catalogs as MCP resources.");
+
+    /** A topic blueprint whose only {@code - } lines are the five known bullets. */
+    private static final String BULLETED_BLUEPRINT = """
+            # 2.4 MCP server integration
+
+            Test knowledge of:
+            - MCP server scoping: project-level vs user-level.
+            - Environment variable expansion in .mcp.json for credential management.
+            - Simultaneous tool discovery at connection time.
+
+            Test skills in:
+            - Configuring shared MCP servers with token expansion.
+            - Exposing content catalogs as MCP resources.
+            """;
+
+    @Test
+    void claudeChatOpeningTurnTargetsOneTopicBullet() throws IOException {
+        writeClaudePrompt("2.4 MCP server integration.md", BULLETED_BLUEPRINT);
+
+        var resp = postChat(claudeBody("2.4 MCP server integration"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var opening = textOf(lastUserMessage());
+        assertThat(opening).startsWith("Ask me the first exam question.");
+        assertThat(QUIZ_BULLETS).filteredOn(opening::endsWith).hasSize(1);
+
+        var cid = json(resp).get("conversationId").asText();
+        var history = rest.getForEntity(url("/api/conversations/" + cid), String.class);
+        assertThat(json(history).get(0).get("content").asText()).isEqualTo(opening);
+    }
+
+    @Test
+    void claudeChatOpeningBulletVariesAcrossChats() throws IOException {
+        writeClaudePrompt("2.4 MCP server integration.md", BULLETED_BLUEPRINT);
+
+        var seen = new HashSet<String>();
+        for (int i = 0; i < 25; i++) {
+            postChat(claudeBody("2.4 MCP server integration"));
+            var opening = textOf(lastUserMessage());
+            QUIZ_BULLETS.stream().filter(opening::endsWith).forEach(seen::add);
+        }
+
+        // 25 draws over 5 bullets land on a single one with probability 5^-24.
+        assertThat(seen).hasSizeGreaterThan(1);
     }
 
     // ── Ground Claude Architect questions in official docs (front-matter sources) ── //

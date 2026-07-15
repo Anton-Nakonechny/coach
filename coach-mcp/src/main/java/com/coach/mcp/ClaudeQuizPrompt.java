@@ -1,8 +1,6 @@
 package com.coach.mcp;
 
-import com.coach.coach.CoachMeta;
 import com.coach.coach.CoachService;
-import com.coach.model.CoachType;
 import io.modelcontextprotocol.server.McpServerFeatures;
 import io.modelcontextprotocol.spec.McpError;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -70,8 +68,9 @@ public class ClaudeQuizPrompt {
                 .orElseThrow(() -> invalidParams("Missing required argument: " + TOPIC_ARG));
         try {
             var topic = resolveTopic(typed);
-            var meta = new CoachMeta(CoachType.CLAUDE_ARCHITECT, topic + ".md", null);
-            var text = coachService.systemPrompt(meta);
+            var meta = coachService.startClaudeArchitect(topic);
+            var text = coachService.systemPrompt(meta) + "\n\n"
+                    + coachService.claudeOpeningInstruction(meta);
             return new McpSchema.GetPromptResult(
                     "Claude Architect quiz: " + topic,
                     List.of(new McpSchema.PromptMessage(

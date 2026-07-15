@@ -98,7 +98,6 @@ public class ChatController {
                 throw new InvalidRequestException("message must be blank when starting a coach chat");
             if (!files.isEmpty())
                 throw new InvalidRequestException("files are not allowed when starting a Claude Architect chat");
-            message = CoachService.CLAUDE_OPENING_INSTRUCTION;
         } else if (coach != CoachType.NONE) {
             if (StringUtils.hasText(message))
                 throw new InvalidRequestException("message must be blank when starting a coach chat");
@@ -124,6 +123,7 @@ public class ChatController {
                     StringUtils.hasText(message) ? message.trim() : null);
         } else if (coach == CoachType.CLAUDE_ARCHITECT) {
             newMeta = coachService.startClaudeArchitect(request.topic().trim());
+            message = coachService.claudeOpeningInstruction(newMeta);
         } else if (coach != CoachType.NONE) {
             newMeta = coachService.startCoach(coach);
         }
