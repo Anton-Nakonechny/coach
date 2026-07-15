@@ -24,6 +24,11 @@ const CLAUDE_WELCOME = 'New chat. Pick a topic below — I will quiz you with ex
 const NEXT_QUESTION = 'Next question.';
 const GLYPH_LABELS = { '語': 'language mode', '字': 'words mode' };
 
+marked.use({ renderer: { link(token) {
+    const html = marked.Renderer.prototype.link.call(this, token);
+    return html.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
+} } });
+
 // DOM elements
 let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
     conversationList, clearAllButton, attachButton, fileInput, attachmentStrip,
