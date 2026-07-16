@@ -5,8 +5,8 @@ import com.fasterxml.jackson.annotation.JsonValue;
 
 public enum ModelKey {
     SONNET_5("sonnet-5"),
+    SONNET_4_6("sonnet-4-6"),
     OPUS_4_8("opus-4-8"),
-    OPUS_4_7("opus-4-7"),
     HAIKU_4_5("haiku-4-5");
 
     private final String value;
