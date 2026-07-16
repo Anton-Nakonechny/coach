@@ -84,3 +84,10 @@ Anthropic boundaries are faked via `@MockitoBean` (`SdkAnthropicGateway` and
 `SdkFileUploadGateway`), driven with `doAnswer`/`doThrow` inline. Follow Red →
 Green → Refactor: write the failing test first, get sign-off, then implement.
 Prefer extending this E2E style over unit tests with heavy mocking.
+
+## Pull requests
+
+Use the original commit message(s) verbatim as the PR title and body. Do not
+paraphrase or rewrite them. If the PR covers multiple commits, use the first
+commit's subject as the title and concatenate all commit messages (subject +
+body) in the PR description.
