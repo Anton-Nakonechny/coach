@@ -21,7 +21,7 @@ import java.util.stream.Collectors;
 public class ModelsConfig {
 
     private static final List<ModelInfo> MODELS = List.of(
-            new ModelInfo(ModelKey.SONNET_4_6, "claude-sonnet-4-6", "Sonnet 4.6", true, true),
+            new ModelInfo(ModelKey.SONNET_5, "claude-sonnet-5", "Sonnet 5", true, true),
             new ModelInfo(ModelKey.OPUS_4_8, "claude-opus-4-8", "Opus 4.8", true, true),
             new ModelInfo(ModelKey.OPUS_4_7, "claude-opus-4-7", "Opus 4.7", true, true),
             new ModelInfo(ModelKey.HAIKU_4_5, "claude-haiku-4-5", "Haiku 4.5", false, false)
@@ -34,7 +34,7 @@ public class ModelsConfig {
     // valid on every effort-capable model above, so the dropdown never causes a 400.
     private static final List<String> EFFORT_LEVELS = List.of("low", "medium", "high", "max");
 
-    private static final ModelKey DEFAULT_MODEL = ModelKey.SONNET_4_6;
+    private static final ModelKey DEFAULT_MODEL = ModelKey.SONNET_5;
     private static final String DEFAULT_EFFORT = "medium";
 
     public List<ModelInfo> models() {
