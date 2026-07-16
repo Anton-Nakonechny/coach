@@ -283,7 +283,7 @@ class ChatApiTest {
     void chatPersistsBothTurnsAsJsonl() throws IOException {
         queueText("an answer");
 
-        String cid = json(postChat(chatBody("a question", "sonnet-4-6", "high", null)))
+        String cid = json(postChat(chatBody("a question", "sonnet-5", "high", null)))
                 .get("conversationId").asText();
 
         List<String> lines = Files.readAllLines(CONV_DIR.resolve(cid + ".jsonl"));
@@ -295,7 +295,7 @@ class ChatApiTest {
         assertThat(userRec.get("content").asText()).isEqualTo("a question");
         assertThat(asstRec.get("content").asText()).isEqualTo("an answer");
         // Metadata captured on every line.
-        assertThat(userRec.get("model").asText()).isEqualTo("sonnet-4-6");
+        assertThat(userRec.get("model").asText()).isEqualTo("sonnet-5");
         assertThat(userRec.get("effort").asText()).isEqualTo("high");
         assertThat(asstRec.get("ts").asText()).isNotBlank();
     }
@@ -684,10 +684,10 @@ class ChatApiTest {
     void sonnetSendsThinkingAndEffort() {
         queueText("ok");
 
-        postChat(chatBody("hi", "sonnet-4-6", "high", null));
+        postChat(chatBody("hi", "sonnet-5", "high", null));
 
         GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
-        assertThat(sent.modelId()).isEqualTo("claude-sonnet-4-6");
+        assertThat(sent.modelId()).isEqualTo("claude-sonnet-5");
         assertThat(sent.extraBody()).isEqualTo(Map.of(
                 "thinking", Map.of("type", "adaptive"),
                 "output_config", Map.of("effort", "high")));
@@ -707,14 +707,14 @@ class ChatApiTest {
             keys.add(m.get("key").asText());
             effortSupport.put(m.get("key").asText(), m.get("supportsEffort").asBoolean());
         }
-        assertThat(keys).containsExactly("sonnet-4-6", "opus-4-8", "opus-4-7", "haiku-4-5");
+        assertThat(keys).containsExactly("sonnet-5", "opus-4-8", "opus-4-7", "haiku-4-5");
         assertThat(effortSupport.get("opus-4-8")).isTrue();
         assertThat(effortSupport.get("haiku-4-5")).isFalse();
 
         List<String> effortLevels = new java.util.ArrayList<>();
         body.get("effortLevels").forEach(n -> effortLevels.add(n.asText()));
         assertThat(effortLevels).containsExactly("low", "medium", "high", "max");
-        assertThat(body.get("defaultModel").asText()).isEqualTo("sonnet-4-6");
+        assertThat(body.get("defaultModel").asText()).isEqualTo("sonnet-5");
     }
 
     @Test
@@ -725,9 +725,9 @@ class ChatApiTest {
             byKey.put(m.get("key").asText(), m);
         }
 
-        JsonNode sonnet = byKey.get("sonnet-4-6");
-        assertThat(sonnet.get("id").asText()).isEqualTo("claude-sonnet-4-6");
-        assertThat(sonnet.get("label").asText()).isEqualTo("Sonnet 4.6");
+        JsonNode sonnet = byKey.get("sonnet-5");
+        assertThat(sonnet.get("id").asText()).isEqualTo("claude-sonnet-5");
+        assertThat(sonnet.get("label").asText()).isEqualTo("Sonnet 5");
         assertThat(sonnet.get("supportsEffort").asBoolean()).isTrue();
         assertThat(sonnet.get("adaptiveThinking").asBoolean()).isTrue();
 
@@ -758,20 +758,20 @@ class ChatApiTest {
     @Test
     void getConversationRehydratesMessages() {
         queueText("the answer");
-        String cid = json(postChat(chatBody("the question", "sonnet-4-6", null, null)))
+        String cid = json(postChat(chatBody("the question", "sonnet-5", null, null)))
                 .get("conversationId").asText();
 
         JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
 
         assertThat(messages.findValuesAsText("role")).containsExactly("user", "assistant");
         assertThat(messages.get(0).get("content").asText()).isEqualTo("the question");
-        assertThat(messages.get(1).get("model").asText()).isEqualTo("sonnet-4-6");
+        assertThat(messages.get(1).get("model").asText()).isEqualTo("sonnet-5");
     }
 
     @Test
     void historyRoleFieldIsLowercase() {
         queueText("the answer");
-        String cid = json(postChat(chatBody("the question", "sonnet-4-6", null, null)))
+        String cid = json(postChat(chatBody("the question", "sonnet-5", null, null)))
                 .get("conversationId").asText();
 
         JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
@@ -838,7 +838,7 @@ class ChatApiTest {
         ResponseEntity<String> resp = rest.postForEntity(url("/api/chat"), body, String.class);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(json(resp).get("model").asText()).isEqualTo("sonnet-4-6");
+        assertThat(json(resp).get("model").asText()).isEqualTo("sonnet-5");
     }
 
     @Test
@@ -1013,7 +1013,7 @@ class ChatApiTest {
 
     /** New-Spanish-chat body; topic omitted when null. */
     private static Map<String, Object> spanishBody(String topic, String words) {
-        Map<String, Object> body = chatBody(words != null ? words : "", "sonnet-4-6", null, null);
+        Map<String, Object> body = chatBody(words != null ? words : "", "sonnet-5", null, null);
         body.put("coachType", "spanish");
         if (topic != null) body.put("topic", topic);
         return body;
@@ -1135,7 +1135,7 @@ class ChatApiTest {
         String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
 
         queueText("Muy bien.");
-        Map<String, Object> followUp = chatBody("Mi traducción.", "sonnet-4-6", null, cid);
+        Map<String, Object> followUp = chatBody("Mi traducción.", "sonnet-5", null, cid);
         postChat(followUp);
 
         GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
@@ -1190,7 +1190,7 @@ class ChatApiTest {
     void spanishChatOnExistingConversationReturns400() throws IOException {
         writeSpanishTopics("Ser y estar");
         queueText("ok");
-        String cid = json(postChat(chatBody("hello", "sonnet-4-6", null, null))).get("conversationId").asText();
+        String cid = json(postChat(chatBody("hello", "sonnet-5", null, null))).get("conversationId").asText();
 
         var body = spanishBody("Ser y estar", "caber");
         body.put("conversationId", cid);
@@ -1202,7 +1202,7 @@ class ChatApiTest {
 
     @Test
     void topicOnNonSpanishChatReturns400() throws IOException {
-        var plain = chatBody("hello", "sonnet-4-6", null, null);
+        var plain = chatBody("hello", "sonnet-5", null, null);
         plain.put("topic", "Ser y estar");
         assertThat(postChat(plain).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
 
@@ -1253,7 +1253,7 @@ class ChatApiTest {
         String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
 
         queueText("(volver) She has become nervous.");
-        JsonNode resp = json(postChat(chatBody("Mi traducción.", "sonnet-4-6", null, cid)));
+        JsonNode resp = json(postChat(chatBody("Mi traducción.", "sonnet-5", null, cid)));
 
         assertThat(resp.get("sentences")).isNotNull();
         assertThat(resp.get("sentences")).hasSize(1);
@@ -1274,7 +1274,7 @@ class ChatApiTest {
     void plainChatResponseHasNullSentencesEvenWhenReplyMatchesFormat() {
         queueText("(caber) I'm surprised that the shovel hasn't fit in the car.");
 
-        JsonNode resp = json(postChat(chatBody("hello", "sonnet-4-6", null, null)));
+        JsonNode resp = json(postChat(chatBody("hello", "sonnet-5", null, null)));
 
         assertThat(resp.get("sentences").isNull()).isTrue();
     }
