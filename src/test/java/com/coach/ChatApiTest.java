@@ -707,7 +707,7 @@ class ChatApiTest {
             keys.add(m.get("key").asText());
             effortSupport.put(m.get("key").asText(), m.get("supportsEffort").asBoolean());
         }
-        assertThat(keys).containsExactly("sonnet-5", "sonnet-4-6", "opus-4-8", "haiku-4-5");
+        assertThat(keys).containsExactly("sonnet-4-6", "sonnet-5", "opus-4-8", "haiku-4-5");
         assertThat(effortSupport.get("opus-4-8")).isTrue();
         assertThat(effortSupport.get("haiku-4-5")).isFalse();
 
@@ -725,9 +725,9 @@ class ChatApiTest {
             byKey.put(m.get("key").asText(), m);
         }
 
-        JsonNode sonnet = byKey.get("sonnet-5");
-        assertThat(sonnet.get("id").asText()).isEqualTo("claude-sonnet-5");
-        assertThat(sonnet.get("label").asText()).isEqualTo("Sonnet 5");
+        JsonNode sonnet = byKey.get("sonnet-4-6");
+        assertThat(sonnet.get("id").asText()).isEqualTo("claude-sonnet-4-6");
+        assertThat(sonnet.get("label").asText()).isEqualTo("Sonnet 4.6");
         assertThat(sonnet.get("supportsEffort").asBoolean()).isTrue();
         assertThat(sonnet.get("adaptiveThinking").asBoolean()).isTrue();
 
