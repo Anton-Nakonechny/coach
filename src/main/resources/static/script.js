@@ -393,6 +393,7 @@ function insertNewlineAtCursor() {
     const start = chatInput.selectionStart;
     const end = chatInput.selectionEnd;
     const value = chatInput.value;
+    if (!value) return;
     chatInput.value = value.slice(0, start) + '\n' + value.slice(end);
     chatInput.selectionStart = chatInput.selectionEnd = start + 1;
     autoResize();

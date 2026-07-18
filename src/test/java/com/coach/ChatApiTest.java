@@ -1060,13 +1060,15 @@ class ChatApiTest {
         String userText = textOf(call.messages().get(0));
         assertThat(userText).contains("Quiero practicar «Ser y estar»");
         assertThat(userText).contains("caber, cavar pala");
-        assertThat(userText).contains("Escríbeme 3 oraciones");
+        assertThat(userText).contains("una oración en inglés por cada palabra o expresión");
+        assertThat(userText).contains("Baraja el orden");
+        assertThat(userText).doesNotContain("oraciones en inglés"); // no backend-computed count
 
         JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
         String persisted = messages.get(0).get("content").asText();
         assertThat(persisted).contains("Quiero practicar «Ser y estar»");
         assertThat(persisted).contains("caber, cavar pala");
-        assertThat(persisted).contains("Escríbeme 3 oraciones");
+        assertThat(persisted).contains("una oración en inglés por cada palabra o expresión");
     }
 
     @Test
@@ -1098,8 +1100,8 @@ class ChatApiTest {
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
         String userText = textOf(call.messages().get(0));
-        assertThat(userText).contains("las siguientes palabras: caber");
-        assertThat(userText).contains("Escríbeme 1 oración");
+        assertThat(userText).contains("las siguientes palabras:").contains("caber");
+        assertThat(userText).contains("una oración en inglés por cada palabra o expresión");
         assertThat(call.messages().get(0).content()).hasSize(2); // attachment still sent
     }
 

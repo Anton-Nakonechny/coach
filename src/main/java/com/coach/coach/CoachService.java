@@ -13,6 +13,8 @@ import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Stream;
 
+import static java.lang.String.format;
+
 /**
  * Coach persona support: selects a random interview-scenario prompt when a coach
  * chat is created, and rebuilds the system prompt (persona + whole scenario file)
@@ -96,20 +98,32 @@ public class CoachService {
         return new CoachMeta(CoachType.SPANISH, null, topic);
     }
 
+    /** Opening practice prompt when the words are typed in: {@code %s} = topic, then the word list. */
+    private static final String OPENING_WITH_WORDS = """
+            Quiero practicar «%s» usando las siguientes palabras:
+            %s
+
+            Escríbeme una oración en inglés por cada palabra o expresión española de la lista \
+            —exactamente una oración por cada una— para que yo las traduzca al español. \
+            Si una línea incluye una traducción o comentario después de un guión, ignóralo y \
+            usa solo la palabra o expresión española. Baraja el orden de las oraciones. \
+            Al principio de cada oración, escribe entre paréntesis la(s) palabra(s) española(s) \
+            que debo usar como pista.""";
+
+    /** Opening practice prompt when the words come from an attachment: {@code %s} = topic. */
+    private static final String OPENING_WITH_ATTACHMENT = """
+            Quiero practicar «%s» usando las palabras del archivo adjunto.
+
+            Escríbeme una oración en inglés por cada palabra o expresión para que yo las traduzca \
+            al español. Baraja el orden de las oraciones. \
+            Al principio de cada oración, escribe entre paréntesis la(s) palabra(s) española(s) \
+            que debo usar como pista.""";
+
     /** Compose the opening practice prompt for a Spanish first turn. */
     public String spanishOpeningPrompt(String topic, String words) {
-        if (words != null) {
-            int n = words.trim().split("[,\\s]+").length;
-            String count = n == 1 ? "1 oración" : n + " oraciones";
-            return "Quiero practicar «" + topic + "» usando las siguientes palabras: " + words + ".\n\n"
-                    + "Escríbeme " + count + " en inglés para que yo las traduzca al español. "
-                    + "Al principio de cada oración, escribe entre paréntesis la(s) palabra(s) española(s) "
-                    + "que debo usar como pista.";
-        }
-        return "Quiero practicar «" + topic + "» usando las palabras del archivo adjunto.\n\n"
-                + "Escríbeme una oración en inglés por cada palabra para que yo las traduzca al español. "
-                + "Al principio de cada oración, escribe entre paréntesis la(s) palabra(s) española(s) "
-                + "que debo usar como pista.";
+        return words == null
+                ? format(OPENING_WITH_ATTACHMENT, topic)
+                : format(OPENING_WITH_WORDS, topic, words);
     }
 
     /** System prompt for any turn: Spanish persona + topic, or COO persona + scenario file. */
