@@ -5,6 +5,7 @@ import com.coach.anthropic.ClaudeClient;
 import com.coach.attach.AttachmentService;
 import com.coach.coach.CoachMeta;
 import com.coach.coach.CoachService;
+import com.coach.coach.QuestionParser;
 import com.coach.coach.SentenceParser;
 import com.coach.model.CoachType;
 import com.coach.model.ModelKey;
@@ -14,6 +15,7 @@ import com.coach.web.dto.ChatRequest;
 import com.coach.web.dto.ChatResponse;
 import com.coach.web.dto.ConversationItem;
 import com.coach.web.dto.MessageItem;
+import com.coach.web.dto.QuizQuestion;
 import com.coach.web.dto.Role;
 import com.coach.web.dto.SentenceItem;
 import jakarta.validation.Valid;
@@ -76,8 +78,8 @@ public class ChatController {
         CoachType coach = request.coachType() != null ? request.coachType() : CoachType.NONE;
         String message = request.message();
 
-        if (StringUtils.hasText(request.topic()) && coach != CoachType.SPANISH)
-            throw new InvalidRequestException("topic can only be set for the Spanish tutor");
+        if (StringUtils.hasText(request.topic()) && coach != CoachType.SPANISH && coach != CoachType.CLAUDE_ARCHITECT)
+            throw new InvalidRequestException("topic can only be set for the Spanish tutor or the Claude Architect coach");
         if (coach != CoachType.NONE && StringUtils.hasText(request.conversationId()))
             throw new InvalidRequestException("coachType can only be set when starting a new chat");
 
@@ -86,6 +88,14 @@ public class ChatController {
                 throw new InvalidRequestException("topic is required for the Spanish tutor");
             if (!StringUtils.hasText(message) && files.isEmpty())
                 throw new InvalidRequestException("message or files are required for the Spanish tutor");
+        } else if (coach == CoachType.CLAUDE_ARCHITECT) {
+            if (!StringUtils.hasText(request.topic()))
+                throw new InvalidRequestException("topic is required for the Claude Architect coach");
+            if (StringUtils.hasText(message))
+                throw new InvalidRequestException("message must be blank when starting a coach chat");
+            if (!files.isEmpty())
+                throw new InvalidRequestException("files are not allowed when starting a Claude Architect chat");
+            message = CoachService.CLAUDE_OPENING_INSTRUCTION;
         } else if (coach != CoachType.NONE) {
             if (StringUtils.hasText(message))
                 throw new InvalidRequestException("message must be blank when starting a coach chat");
@@ -108,6 +118,8 @@ public class ChatController {
             message = coachService.spanishOpeningPrompt(
                     meta.topic(),
                     StringUtils.hasText(message) ? message.trim() : null);
+        } else if (coach == CoachType.CLAUDE_ARCHITECT) {
+            store.saveCoachMeta(conversationId, coachService.startClaudeArchitect(request.topic().trim()));
         } else if (coach != CoachType.NONE) {
             store.saveCoachMeta(conversationId, coachService.startCoach(coach));
         }
@@ -124,12 +136,21 @@ public class ChatController {
                 .filter(m -> m.coachType() == CoachType.SPANISH)
                 .map(__ -> parseSentences(answer))
                 .orElse(null);
-        return new ChatResponse(answer, model, conversationId, sentences);
+        var question = meta
+                .filter(m -> m.coachType() == CoachType.CLAUDE_ARCHITECT)
+                .map(__ -> QuestionParser.parse(answer))
+                .orElse(null);
+        return new ChatResponse(answer, model, conversationId, sentences, question);
     }
 
     @GetMapping("/coaches/spanish/topics")
     public List<String> spanishTopics() {
         return coachService.spanishTopics();
+    }
+
+    @GetMapping("/coaches/claude-architect/topics")
+    public List<String> claudeTopics() {
+        return coachService.claudeTopics();
     }
 
     @GetMapping("/models")
@@ -151,15 +172,22 @@ public class ChatController {
         List<MessageItem> messages = store.loadMessages(conversationId);
         if (messages.isEmpty())
             throw new ConversationNotFoundException("Conversation not found");
-        boolean isSpanish = store.coachMeta(conversationId)
-                .map(m -> m.coachType() == CoachType.SPANISH)
-                .orElse(false);
-        if (!isSpanish) return messages;
-        return messages.stream().map(m -> {
-            if (m.role() != Role.ASSISTANT) return m;
-            var s = parseSentences(m.content());
-            return s == null ? m : m.withSentences(s);
-        }).toList();
+        var coachType = store.coachMeta(conversationId)
+                .map(CoachMeta::coachType)
+                .orElse(CoachType.NONE);
+        if (coachType == CoachType.SPANISH)
+            return messages.stream().map(m -> {
+                if (m.role() != Role.ASSISTANT) return m;
+                var s = parseSentences(m.content());
+                return s == null ? m : m.withSentences(s);
+            }).toList();
+        if (coachType == CoachType.CLAUDE_ARCHITECT)
+            return messages.stream().map(m -> {
+                if (m.role() != Role.ASSISTANT) return m;
+                QuizQuestion q = QuestionParser.parse(m.content());
+                return q == null ? m : m.withQuestion(q);
+            }).toList();
+        return messages;
     }
 
     private List<SentenceItem> parseSentences(String text) {

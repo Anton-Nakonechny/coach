@@ -11,9 +11,14 @@ public record MessageItem(
         ModelKey model,
         String effort,
         List<AttachmentMeta> attachments,
-        List<SentenceItem> sentences
+        List<SentenceItem> sentences,
+        QuizQuestion question
 ) {
     public MessageItem withSentences(List<SentenceItem> s) {
-        return new MessageItem(role, content, model, effort, attachments, s);
+        return new MessageItem(role, content, model, effort, attachments, s, question);
+    }
+
+    public MessageItem withQuestion(QuizQuestion q) {
+        return new MessageItem(role, content, model, effort, attachments, sentences, q);
     }
 }

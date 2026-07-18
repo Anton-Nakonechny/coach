@@ -9,5 +9,6 @@ public record ChatResponse(
         String answer,
         ModelKey model,
         String conversationId,
-        List<SentenceItem> sentences
+        List<SentenceItem> sentences,
+        QuizQuestion question
 ) { }

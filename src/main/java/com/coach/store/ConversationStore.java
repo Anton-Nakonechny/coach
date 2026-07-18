@@ -168,6 +168,7 @@ public class ConversationStore {
                         modelStr != null ? ModelKey.fromValue(modelStr) : null,
                         text(node, "effort"),
                         attachments(node.get("attachments")),
+                        null,
                         null));
             }
         } catch (IOException e) {

@@ -1025,6 +1025,173 @@ class ChatApiTest {
         return body;
     }
 
+    private static Path claudeDir() {
+        return COACHES_DIR.resolve("Claude");
+    }
+
+    private static void writeClaudePrompt(String name, String content) throws IOException {
+        var dir = claudeDir();
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve(name), content, UTF_8);
+    }
+
+    /** New-Claude-Architect-chat body; topic omitted when null. */
+    private static Map<String, Object> claudeBody(String topic) {
+        Map<String, Object> body = chatBody("", "sonnet-4-6", null, null);
+        body.put("coachType", "claude-architect");
+        if (topic != null) body.put("topic", topic);
+        return body;
+    }
+
+    // ── Commit 1: Serve Claude Architect topics from coaches/Claude prompt files ── //
+
+    @Test
+    void claudeTopicsEndpointReturnsPromptFileStemsInOrder() throws IOException {
+        writeClaudePrompt("2.1 Tool interface design.md", "content");
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        writeClaudePrompt("README.md", "index");
+        writeClaudePrompt("notes.txt", "ignored");
+
+        var resp = rest.getForEntity(url("/api/coaches/claude-architect/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = json(resp);
+        assertThat(body.isArray()).isTrue();
+        assertThat(body).hasSize(2);
+        assertThat(body.get(0).asText()).isEqualTo("1.1 Agentic loops");
+        assertThat(body.get(1).asText()).isEqualTo("2.1 Tool interface design");
+    }
+
+    @Test
+    void claudeTopicsEndpointWithMissingDirReturns500() {
+        var resp = rest.getForEntity(url("/api/coaches/claude-architect/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).contains("topics");
+    }
+
+    // ── Commit 2: Start Claude Architect quiz chats from a selected topic ─── //
+
+    @Test
+    void claudeChatStartsQuizWithPersonaAndTopicPrompt() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "STOP_REASON DRILL");
+
+        var resp = postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("Claude Certified Architect");
+        assertThat(call.system()).contains("MANDATORY format");
+        assertThat(call.system()).contains("STOP_REASON DRILL");
+        assertThat(roles(call)).containsExactly("user");
+        assertThat(textOf(lastUserMessage())).isEqualTo("Ask me the first exam question.");
+
+        var cid = json(resp).get("conversationId").asText();
+        var history = rest.getForEntity(url("/api/conversations/" + cid), String.class);
+        assertThat(json(history).get(0).get("content").asText()).isEqualTo("Ask me the first exam question.");
+    }
+
+    @Test
+    void claudeChatPersistsPromptFileMetaSidecar() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+
+        var resp = postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var cid = json(resp).get("conversationId").asText();
+        var meta = store.coachMeta(cid);
+        assertThat(meta).isPresent();
+        assertThat(meta.get().coachType().value()).isEqualTo("claude-architect");
+        assertThat(meta.get().promptFile()).isEqualTo("1.1 Agentic loops.md");
+        assertThat(meta.get().topic()).isNull();
+    }
+
+    @Test
+    void claudeConversationListItemShowsTopicPreview() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+
+        postChat(claudeBody("1.1 Agentic loops"));
+
+        var list = rest.getForEntity(url("/api/conversations"), String.class);
+        var item = json(list).get(0);
+        assertThat(item.get("preview").asText()).isEqualTo("Claude · 1.1 Agentic loops");
+        assertThat(item.get("coachType").asText()).isEqualTo("claude-architect");
+    }
+
+    @Test
+    void claudeFollowUpIsPassthroughWithPersonaSystemPrompt() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "STOP_REASON DRILL");
+
+        var startResp = json(postChat(claudeBody("1.1 Agentic loops")));
+        var cid = startResp.get("conversationId").asText();
+
+        var followUp = chatBody("Next question.", "sonnet-4-6", null, cid);
+        postChat(followUp);
+
+        var call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("Claude Certified Architect");
+        assertThat(call.system()).contains("STOP_REASON DRILL");
+        assertThat(roles(call)).containsExactly("user", "assistant", "user");
+        assertThat(textOf(lastUserMessage())).isEqualTo("Next question.");
+    }
+
+    @Test
+    void claudeChatWithoutTopicReturns400() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+
+        var resp = postChat(claudeBody(null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("topic");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void claudeChatWithUnknownTopicReturns400() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+
+        var resp = postChat(claudeBody("No such topic"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("No such topic");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+    }
+
+    @Test
+    void claudeChatWithNonBlankMessageReturns400() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        var body = claudeBody("1.1 Agentic loops");
+        body.put("message", "hi");
+
+        var resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("blank");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+    }
+
+    @Test
+    void claudeChatOnExistingConversationReturns400() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        var body = claudeBody("1.1 Agentic loops");
+        body.put("conversationId", "existing123");
+
+        var resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("new chat");
+    }
+
+    @Test
+    void claudeChatWithMissingPromptsDirReturns500() {
+        var resp = postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+        assertThat(gatewayCalls).isEmpty();
+    }
+
     @Test
     void spanishTopicsEndpointReturnsTopicsInFileOrder() throws IOException {
         writeSpanishTopics("Ser y estar", "", "  Por y para  ");
@@ -1508,6 +1675,147 @@ class ChatApiTest {
         assertThat(icon.getBody()).contains("#FFD43B");
     }
 
+    // ── Commit 3 (new): Parse Claude Architect question replies ────────────── //
+
+    @Test
+    void claudeChatResponseParsesQuestionIntoStemAndOptions() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        String reply = "A tricky scenario.\nWhat is the right approach?\n\nA) Alpha.\nB) Bravo.\nC) Charlie.\nD) Delta.";
+        queueText(reply);
+
+        JsonNode resp = json(postChat(claudeBody("1.1 Agentic loops")));
+
+        assertThat(resp.get("sentences").isNull()).isTrue();
+        JsonNode q = resp.get("question");
+        assertThat(q).isNotNull();
+        assertThat(q.get("stem").asText()).isEqualTo("A tricky scenario.\nWhat is the right approach?");
+        assertThat(q.get("options")).hasSize(4);
+        assertThat(q.get("options").get(0).get("letter").asText()).isEqualTo("A");
+        assertThat(q.get("options").get(0).get("text").asText()).isEqualTo("Alpha.");
+        assertThat(q.get("options").get(1).get("letter").asText()).isEqualTo("B");
+        assertThat(q.get("options").get(2).get("letter").asText()).isEqualTo("C");
+        assertThat(q.get("options").get(3).get("letter").asText()).isEqualTo("D");
+        assertThat(q.get("options").get(3).get("text").asText()).isEqualTo("Delta.");
+    }
+
+    @Test
+    void claudeFeedbackReplyHasNullQuestion() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        queueText("Correct — A. Hooks give deterministic ordering of side effects.");
+
+        JsonNode resp = json(postChat(claudeBody("1.1 Agentic loops")));
+
+        assertThat(resp.get("question").isNull()).isTrue();
+        assertThat(resp.get("answer").asText()).contains("Correct");
+    }
+
+    @Test
+    void claudeReplyWithTextAfterOptionsHasNullQuestion() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        queueText("Stem line.\nA) Alpha.\nB) Bravo.\nC) Charlie.\nD) Delta.\nExtra trailing line.");
+
+        JsonNode resp = json(postChat(claudeBody("1.1 Agentic loops")));
+
+        assertThat(resp.get("question").isNull()).isTrue();
+    }
+
+    @Test
+    void claudeReplyWithThreeOptionsHasNullQuestion() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        queueText("Stem line.\nA) Alpha.\nB) Bravo.\nC) Charlie.");
+
+        JsonNode resp = json(postChat(claudeBody("1.1 Agentic loops")));
+
+        assertThat(resp.get("question").isNull()).isTrue();
+    }
+
+    @Test
+    void claudeReplyWithoutStemHasNullQuestion() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        queueText("A) Alpha.\nB) Bravo.\nC) Charlie.\nD) Delta.");
+
+        JsonNode resp = json(postChat(claudeBody("1.1 Agentic loops")));
+
+        assertThat(resp.get("question").isNull()).isTrue();
+    }
+
+    @Test
+    void claudeReplyWithWrongLetterOrderHasNullQuestion() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        queueText("Stem.\nA) Alpha.\nB) Bravo.\nD) Delta.\nC) Charlie.");
+
+        JsonNode resp = json(postChat(claudeBody("1.1 Agentic loops")));
+
+        assertThat(resp.get("question").isNull()).isTrue();
+    }
+
+    @Test
+    void plainChatResponseHasNullQuestionEvenWhenReplyMatchesFormat() {
+        queueText("Stem.\nA) Alpha.\nB) Bravo.\nC) Charlie.\nD) Delta.");
+
+        JsonNode resp = json(postChat(chatBody("hi", "sonnet-4-6", null, null)));
+
+        assertThat(resp.get("question").isNull()).isTrue();
+    }
+
+    @Test
+    void getClaudeConversationDerivesQuestionsForAssistantMessages() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        String questionReply = "Which is correct?\nA) Alpha.\nB) Bravo.\nC) Charlie.\nD) Delta.";
+        String feedbackReply = "Correct! A is right because hooks are deterministic.";
+        queueText(questionReply);
+        String cid = json(postChat(claudeBody("1.1 Agentic loops"))).get("conversationId").asText();
+        queueText(feedbackReply);
+        postChat(chatBody("A) Alpha.", "sonnet-4-6", null, cid));
+
+        var messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+
+        // user turns: question null
+        assertThat(messages.get(0).get("role").asText()).isEqualTo("user");
+        assertThat(messages.get(0).get("question").isNull()).isTrue();
+        // first assistant (question-shaped): question non-null
+        assertThat(messages.get(1).get("role").asText()).isEqualTo("assistant");
+        assertThat(messages.get(1).get("question")).isNotNull();
+        assertThat(messages.get(1).get("question").get("options")).hasSize(4);
+        // second user: question null
+        assertThat(messages.get(2).get("question").isNull()).isTrue();
+        // second assistant (feedback): question null
+        assertThat(messages.get(3).get("question").isNull()).isTrue();
+
+        // Raw JSONL on disk must not contain "question"
+        try (var lines = Files.lines(CONV_DIR.resolve(cid + ".jsonl"))) {
+            lines.forEach(line -> assertThat(line).doesNotContain("\"question\""));
+        }
+    }
+
+    @Test
+    void getSpanishConversationHasNullQuestion() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        queueText("Stem.\nA) Alpha.\nB) Bravo.\nC) Charlie.\nD) Delta.");
+
+        var startResp = json(postChat(spanishBody("Ser y estar", "caber")));
+        var cid = startResp.get("conversationId").asText();
+
+        var messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+        messages.forEach(m -> assertThat(m.get("question").isNull()).isTrue());
+    }
+
+    // Issue #9: feedback reply with A-D lines at end must not be parsed as a quiz question
+    @Test
+    void claudeFeedbackWithTrailingOptionLines_hasNullQuestion() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        queueText("""
+                The correct answer was A. Here is why each option is right or wrong:
+                A) Hooks — correct because they provide deterministic ordering of side effects.
+                B) Promises — incorrect because they are resolved asynchronously.
+                C) Events — incorrect because emission order is not guaranteed.
+                D) Callbacks — incorrect because they do not enforce a specific ordering.""");
+
+        JsonNode resp = json(postChat(claudeBody("1.1 Agentic loops")));
+
+        assertThat(resp.get("question").isNull()).isTrue();
+    }
+
     // Issue #2: unknown coachType in a sidecar must not kill the entire sidebar listing
     @Test
     void listConversations_withUnknownCoachTypeInSidecar_doesNotCrashAndReturnsBothEntries()
@@ -1516,7 +1824,6 @@ class ChatApiTest {
         String goodId = json(postChat(chatBody("hi", "opus-4-8", null, null)))
                 .get("conversationId").asText();
 
-        // Inject a .jsonl + .meta.json with an unrecognised coachType
         String badId = "corrupt-sidecar-000";
         Files.writeString(CONV_DIR.resolve(badId + ".jsonl"),
                 "{\"role\":\"user\",\"content\":\"hello\",\"model\":\"opus-4-8\"}\n");
@@ -1525,12 +1832,22 @@ class ChatApiTest {
 
         ResponseEntity<String> resp = rest.getForEntity(url("/api/conversations"), String.class);
 
-        // Both entries appear — corrupt meta falls back to first-message preview, no 500
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         var ids = new ArrayList<String>();
         json(resp).forEach(item -> ids.add(item.get("conversationId").asText()));
         assertThat(ids).contains(goodId);
         assertThat(ids).contains(badId);
+    }
+
+    // Issue #3: file attachments on a Claude Architect start must be rejected
+    @Test
+    void claudeArchitectChatStart_withFileAttachment_returns400() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+
+        var resp = postChatMultipart(claudeBody("1.1 Agentic loops"),
+                List.of(new PartFile("notes.txt", "text/plain", "data".getBytes(UTF_8))));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     // Issue #10: removing a scenario file must not expose internal paths in the 500 response
