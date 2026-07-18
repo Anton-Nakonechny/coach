@@ -24,6 +24,7 @@ public class ModelsConfig {
             new ModelInfo(ModelKey.SONNET_4_6, "claude-sonnet-4-6", "Sonnet 4.6", true, true),
             new ModelInfo(ModelKey.SONNET_5, "claude-sonnet-5", "Sonnet 5", true, true),
             new ModelInfo(ModelKey.OPUS_4_8, "claude-opus-4-8", "Opus 4.8", true, true),
+            new ModelInfo(ModelKey.FABLE_5, "claude-fable-5", "Fable 5", true, true),
             new ModelInfo(ModelKey.HAIKU_4_5, "claude-haiku-4-5", "Haiku 4.5", false, false)
     );
 

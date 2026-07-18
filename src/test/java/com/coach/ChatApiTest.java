@@ -698,7 +698,7 @@ class ChatApiTest {
     // ----------------------------------------------------------------------- //
 
     @Test
-    void modelsEndpointListsFourModels() {
+    void modelsEndpointListsFiveModels() {
         JsonNode body = json(rest.getForEntity(url("/api/models"), String.class));
 
         List<String> keys = new java.util.ArrayList<>();
@@ -707,7 +707,7 @@ class ChatApiTest {
             keys.add(m.get("key").asText());
             effortSupport.put(m.get("key").asText(), m.get("supportsEffort").asBoolean());
         }
-        assertThat(keys).containsExactly("sonnet-4-6", "sonnet-5", "opus-4-8", "haiku-4-5");
+        assertThat(keys).containsExactly("sonnet-4-6", "sonnet-5", "opus-4-8", "fable-5", "haiku-4-5");
         assertThat(effortSupport.get("opus-4-8")).isTrue();
         assertThat(effortSupport.get("haiku-4-5")).isFalse();
 
@@ -730,6 +730,12 @@ class ChatApiTest {
         assertThat(sonnet.get("label").asText()).isEqualTo("Sonnet 4.6");
         assertThat(sonnet.get("supportsEffort").asBoolean()).isTrue();
         assertThat(sonnet.get("adaptiveThinking").asBoolean()).isTrue();
+
+        JsonNode fable = byKey.get("fable-5");
+        assertThat(fable.get("id").asText()).isEqualTo("claude-fable-5");
+        assertThat(fable.get("label").asText()).isEqualTo("Fable 5");
+        assertThat(fable.get("supportsEffort").asBoolean()).isTrue();
+        assertThat(fable.get("adaptiveThinking").asBoolean()).isTrue();
 
         JsonNode haiku = byKey.get("haiku-4-5");
         assertThat(haiku.get("supportsEffort").asBoolean()).isFalse();
