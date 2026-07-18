@@ -9,3 +9,6 @@ conversations/
 *.iml
 *.swp
 Archive/
+node_modules/
+playwright-report/
+test-results/
