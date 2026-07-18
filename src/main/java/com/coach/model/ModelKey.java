@@ -7,6 +7,7 @@ public enum ModelKey {
     SONNET_4_6("sonnet-4-6"),
     SONNET_5("sonnet-5"),
     OPUS_4_8("opus-4-8"),
+    FABLE_5("fable-5"),
     HAIKU_4_5("haiku-4-5");
 
     private final String value;
