@@ -8,17 +8,30 @@
     <meta http-equiv="Expires" content="0">
     <title>Claude Chat</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="style.css?v=4">
+    <link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
     <div class="container">
         <header>
+            <button id="sidebarToggle" class="icon-button" aria-label="Menu" aria-expanded="false" aria-controls="sidebar">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <line x1="3" y1="6" x2="21" y2="6"></line>
+                    <line x1="3" y1="12" x2="21" y2="12"></line>
+                    <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
+            </button>
             <h1>Claude Chat</h1>
+            <button id="coachToggle" class="icon-button" aria-label="Coach" aria-expanded="false" aria-controls="coachPanel">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="12" cy="7" r="4"></circle>
+                </svg>
+            </button>
         </header>
 
         <div class="main-content">
             <!-- Left Sidebar -->
-            <aside class="sidebar">
+            <aside class="sidebar" id="sidebar">
                 <div class="sidebar-section">
                     <button id="newChatButton" class="new-chat-button">+ New Chat</button>
                 </div>
@@ -91,7 +104,7 @@
             </main>
 
             <!-- Right coach panel -->
-            <aside class="coach-panel">
+            <aside class="coach-panel" id="coachPanel">
                 <div class="sidebar-section">
                     <div class="sidebar-label">Coach</div>
                     <div class="coach-options">
@@ -102,10 +115,12 @@
                     <p id="coachNote" class="coach-note" aria-live="polite"></p>
                 </div>
             </aside>
+
+            <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
         </div>
     </div>
 
     <script src="marked.min.js?v=1"></script>
-    <script src="script.js?v=5"></script>
+    <script src="script.js?v=6"></script>
 </body>
 </html>
