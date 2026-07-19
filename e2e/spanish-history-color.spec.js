@@ -1,11 +1,5 @@
 const { test, expect } = require('@playwright/test');
-
-const MODELS_RESPONSE = {
-    models: [{ key: 'sonnet-4-6', id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', supportsEffort: true, adaptiveThinking: true }],
-    effortLevels: ['low', 'medium', 'high', 'max'],
-    defaultModel: 'sonnet-4-6',
-    defaultEffort: 'medium',
-};
+const { MODELS_RESPONSE } = require('./fixtures');
 
 test('Spanish history item shows gualda color', async ({ page }) => {
     await page.route('**/api/models', route =>
