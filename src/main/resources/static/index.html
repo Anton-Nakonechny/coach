@@ -8,7 +8,7 @@
     <meta http-equiv="Expires" content="0">
     <title>Claude Chat</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="style.css?v=6">
+    <link rel="stylesheet" href="style.css?v=7">
 </head>
 <body>
     <div class="container">
@@ -110,7 +110,13 @@
                     <div class="coach-options">
                         <label><input type="radio" name="coach" value="none" checked> None</label>
                         <label><input type="radio" name="coach" value="chief-operating-officer"> Chief Operating Officer</label>
-                        <label><input type="radio" name="coach" value="spanish"> Español</label>
+                        <label>
+                            <input type="radio" name="coach" value="spanish"> Español
+                            <span id="spanishModeToggle" class="mode-toggle" hidden>
+                                <button class="mode-btn active" data-mode="language" aria-pressed="true">語</button>
+                                <button class="mode-btn" data-mode="words" aria-pressed="false">字</button>
+                            </span>
+                        </label>
                         <label><input type="radio" name="coach" value="claude-architect"> Claude Architect</label>
                     </div>
                     <p id="coachNote" class="coach-note" aria-live="polite"></p>
@@ -122,6 +128,6 @@
     </div>
 
     <script src="marked.min.js?v=1"></script>
-    <script src="script.js?v=7"></script>
+    <script src="script.js?v=8"></script>
 </body>
 </html>

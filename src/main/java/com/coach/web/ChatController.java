@@ -88,8 +88,6 @@ public class ChatController {
             throw new InvalidRequestException("coachType can only be set when starting a new chat");
 
         if (coach == CoachType.SPANISH) {
-            if (!StringUtils.hasText(request.topic()))
-                throw new InvalidRequestException("topic is required for the Spanish tutor");
             if (!StringUtils.hasText(message) && files.isEmpty())
                 throw new InvalidRequestException("message or files are required for the Spanish tutor");
         } else if (coach == CoachType.CLAUDE_ARCHITECT) {
@@ -117,8 +115,9 @@ public class ChatController {
 
         CoachMeta newMeta = null;
         if (coach == CoachType.SPANISH) {
-            // Validates topic membership — throws 400/500 before any persistence.
-            newMeta = coachService.startSpanish(request.topic().trim());
+            // Validates topic membership when a topic is given; skips validation for topic-less start.
+            newMeta = coachService.startSpanish(
+                    StringUtils.hasText(request.topic()) ? request.topic().trim() : null);
             message = coachService.spanishOpeningPrompt(
                     newMeta.topic(),
                     StringUtils.hasText(message) ? message.trim() : null);

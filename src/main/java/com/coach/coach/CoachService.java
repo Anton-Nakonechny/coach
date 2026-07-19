@@ -3,14 +3,20 @@ package com.coach.coach;
 import com.coach.config.AppConfig;
 import com.coach.model.CoachType;
 import com.coach.web.InvalidRequestException;
+import com.coach.web.dto.SentenceItem;
 import com.coach.web.dto.TopicSection;
+import com.coach.word.WordPair;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Stream;
 
@@ -133,8 +139,13 @@ public class CoachService {
         return new CoachMeta(type, chosen.getFileName().toString(), null);
     }
 
-    /** Validate topic membership and return the meta for a new Spanish conversation. */
+    /**
+     * Return the meta for a new Spanish conversation. When {@code topic} is blank/null,
+     * the chat is topic-less (字 word-seeding into a 語 session) and no validation is done.
+     */
     public CoachMeta startSpanish(String topic) {
+        if (topic == null || topic.isBlank())
+            return new CoachMeta(CoachType.SPANISH, null, null);
         if (spanishTopics().stream().noneMatch(s -> s.topics().contains(topic)))
             throw new InvalidRequestException("Unknown Spanish topic: " + topic);
         return new CoachMeta(CoachType.SPANISH, null, topic);
@@ -147,9 +158,12 @@ public class CoachService {
         return new CoachMeta(CoachType.CLAUDE_ARCHITECT, topic + ".md", null);
     }
 
-    /** Opening practice prompt when the words are typed in: {@code %s} = topic, then the word list. */
+    /**
+     * Opening practice prompt when words are typed in. {@code %s} = optional topic clause
+     * (e.g. {@code " «Ser y estar»"} or {@code ""} for topic-less), then the word list.
+     */
     private static final String OPENING_WITH_WORDS = """
-            Quiero practicar «%s» usando las siguientes palabras:
+            Quiero practicar%s usando las siguientes palabras:
             %s
 
             Escríbeme una oración en inglés por cada palabra o expresión española de la lista \
@@ -158,6 +172,24 @@ public class CoachService {
             usa solo la palabra o expresión española. Baraja el orden de las oraciones. \
             Al principio de cada oración, escribe entre paréntesis la(s) palabra(s) española(s) \
             que debo usar como pista.""";
+
+    /**
+     * System prompt for the 字 translate step: each input Spanish word/expression on one line
+     * in {@code (español) english} format so {@link SentenceParser} can parse it.
+     */
+    public static final String WORD_TRANSLATE_SYSTEM = """
+            Eres un asistente de traducción del español al inglés. Para cada palabra o \
+            expresión española de la lista, escribe exactamente una línea con este formato:
+            (palabra_española) traducción_al_inglés
+
+            Reglas OBLIGATORIAS:
+            - Exactamente una línea por entrada, en el mismo orden que la lista.
+            - Escribe la palabra o expresión española original entre paréntesis, \
+              seguida de un espacio y la traducción al inglés.
+            - Si una entrada incluye texto después de un guión, ignóralo y usa solo \
+              la palabra o expresión española.
+            - Sin introducción, sin numeración, sin viñetas, sin Markdown y sin texto \
+              de despedida.""";
 
     /** Opening practice prompt when the words come from an attachment: {@code %s} = topic. */
     private static final String OPENING_WITH_ATTACHMENT = """
@@ -170,15 +202,17 @@ public class CoachService {
 
     /** Compose the opening practice prompt for a Spanish first turn. */
     public String spanishOpeningPrompt(String topic, String words) {
-        return words == null
-                ? format(OPENING_WITH_ATTACHMENT, topic)
-                : format(OPENING_WITH_WORDS, topic, words);
+        if (words == null) return format(OPENING_WITH_ATTACHMENT, topic);
+        String topicClause = topic == null ? "" : " «" + topic + "»";
+        return format(OPENING_WITH_WORDS, topicClause, words);
     }
 
-    /** System prompt for any turn: Spanish persona + topic, or COO/Claude persona + scenario file. */
+    /** System prompt for any turn: Spanish persona (+ topic if set), or COO/Claude persona + scenario file. */
     public String systemPrompt(CoachMeta meta) {
         if (meta.coachType() == CoachType.SPANISH)
-            return SPANISH_PERSONA + "\n\nTema de práctica: " + meta.topic();
+            return meta.topic() == null
+                    ? SPANISH_PERSONA
+                    : SPANISH_PERSONA + "\n\nTema de práctica: " + meta.topic();
         // Basename guard: the stored filename must never escape the coach folder.
         String safe = Path.of(meta.promptFile()).getFileName().toString();
         Path scenario = coachDir(meta.coachType()).resolve(safe);
@@ -275,5 +309,74 @@ public class CoachService {
             case CLAUDE_ARCHITECT -> coachesDir.resolve("Claude");
             case NONE -> throw new IllegalArgumentException("No coach directory for NONE");
         };
+    }
+
+    // ── 字 word-quiz helpers ─────────────────────────────────────────────────── //
+
+    /**
+     * Split {@code raw} on commas and newlines, strip anything after a dash
+     * ({@code -}, {@code –}, {@code —}), trim, and drop blanks.
+     */
+    public List<String> parseWordList(String raw) {
+        if (raw == null) return List.of();
+        return Arrays.stream(raw.split("[,\n]+"))
+                .map(s -> s.replaceFirst("\\s+-\\s+.*|[–—].*", ""))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toList();
+    }
+
+    /**
+     * Mask all but the first non-space character of each word in {@code word},
+     * replacing subsequent non-space characters with {@code ·} (U+00B7) and
+     * preserving spaces.
+     * <p>Examples: {@code cráneo} → {@code c·····},
+     * {@code caber en} → {@code c···· ··}.
+     */
+    public String maskHint(String word) {
+        boolean first = true;
+        var sb = new StringBuilder();
+        for (char c : word.toCharArray()) {
+            if (c == ' ') {
+                sb.append(' ');
+            } else if (first) {
+                sb.append(c);
+                first = false;
+            } else {
+                sb.append('·');
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Match the LLM-translated lines (via {@link SentenceParser}) back to the original
+     * input tokens and build {@link WordPair}s.
+     *
+     * <p>Matching strategy: normalise the echoed español in each parsed line with
+     * {@link Text#normalizeKey} and look it up in the original token list; fall back to
+     * positional order when no normalised match exists.
+     *
+     * @throws IllegalStateException if the LLM output cannot be parsed
+     */
+    public List<WordPair> pairTranslations(List<String> tokens, String llmAnswer) {
+        List<SentenceItem> items = SentenceParser.parse(llmAnswer);
+        if (items.isEmpty())
+            throw new IllegalStateException("Could not parse translations, try again.");
+
+        // Normalized original → original token (first occurrence wins)
+        Map<String, String> normToOrig = new LinkedHashMap<>();
+        for (String token : tokens)
+            normToOrig.put(Text.normalizeKey(token), token);
+
+        int count = Math.min(tokens.size(), items.size());
+        List<WordPair> pairs = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            SentenceItem item = items.get(i);
+            String norm = Text.normalizeKey(item.hint());
+            String original = normToOrig.getOrDefault(norm, tokens.get(i));
+            pairs.add(new WordPair(item.sentence(), original));
+        }
+        return pairs;
     }
 }

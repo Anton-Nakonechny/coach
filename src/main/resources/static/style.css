@@ -475,6 +475,13 @@ header { display: none; }
 .topic-button:hover { background: var(--surface-hover); color: var(--text-primary); }
 .topic-button.active { border-color: var(--coach-accent); color: var(--coach-accent); }
 
+/* ── 語/字 mode toggle ───────────────────────────────────────── */
+
+.mode-toggle { display: inline-flex; border: 1px solid var(--coach-accent); border-radius: 8px; overflow: hidden; margin-left: 0.5rem; vertical-align: middle; }
+.mode-btn { padding: 0.2rem 0.5rem; font-size: 0.85rem; background: transparent; color: var(--coach-accent); border: none; cursor: pointer; line-height: 1.4; }
+.mode-btn.active { background: var(--coach-accent); color: #fff; }
+.mode-btn:focus-visible { outline: 2px solid var(--coach-accent); outline-offset: -2px; }
+
 /* ── Spanish sentence cards ─────────────────────────────────── */
 
 .sentence-cards { display: flex; flex-direction: column; gap: 0.5rem; }
@@ -482,6 +489,20 @@ header { display: none; }
 .sentence-card:hover { background: var(--surface-hover); }
 .hint-icon { position: relative; flex-shrink: 0; width: 1.4rem; height: 1.4rem; display: flex; align-items: center; justify-content: center; border: 1px solid var(--coach-accent); border-radius: 50%; color: var(--coach-accent); font-size: 0.8rem; }
 .hint-icon:hover::after { content: attr(data-hint); position: absolute; bottom: calc(100% + 6px); right: 0; white-space: nowrap; background: var(--background); color: var(--coach-accent); border: 1px solid var(--coach-accent); border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.8rem; z-index: 10; }
+
+/* ── 字 word-quiz rows ───────────────────────────────────────── */
+
+.word-check { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem; }
+.word-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.8rem; background: var(--surface); border: 1px solid var(--border-color); border-radius: 8px; }
+.word-english { flex: 1; font-size: 0.9rem; color: var(--text-primary); }
+.word-answer { flex: 1; padding: 0.35rem 0.5rem; font-size: 0.9rem; background: var(--background); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; min-width: 0; }
+.word-answer:focus { outline: none; border-color: var(--coach-accent); }
+.word-row.correct { border-color: #2e7d32; }
+.word-row.correct .word-english { color: #2e7d32; }
+.word-row.incorrect { border-color: #c62828; }
+.word-row.incorrect .word-english { color: #c62828; }
+.word-grade { font-size: 1rem; flex-shrink: 0; }
+.word-spanish-reveal { font-size: 0.8rem; color: var(--text-secondary); flex-shrink: 0; }
 
 /* Responsive */
 

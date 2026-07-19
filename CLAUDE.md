@@ -69,8 +69,23 @@ history** rebuilt from disk.
   no other option lines, ≥1 stem line) populates the `question` field of
   `ChatResponse` and `MessageItem` (derived at read time, never persisted). The PDF
   exam guide is gitignored (`coaches/Claude/*.pdf`) and must never be committed.
-- **`web/ChatController`** + `ApiExceptionHandler` — the seven route handlers (`/api/chat`
-  has JSON + multipart overloads); the handler maps
+  **字 word mode (ephemeral):** `word/WordSetStore` stores translated pairs in a
+  `ConcurrentHashMap` keyed by UUID id, TTL 60 min, max 500 entries. `coach/Text`
+  provides `normalizeKey` (NFD + strip diacritics + lowercase + trim). SPANISH with
+  blank/null topic → `startSpanish(null)` → `CoachMeta(SPANISH, null, null)`,
+  system prompt = `SPANISH_PERSONA` only (no topic clause). `parseWordList` splits
+  on commas/newlines, strips dash-comments, trims. `maskHint` keeps first non-space
+  char, replaces the rest with `·` (U+00B7). `pairTranslations` calls `SentenceParser`
+  on the LLM output and matches echoed español back to the original tokens via
+  `normalizeKey` with positional fallback. `WORD_TRANSLATE_SYSTEM` drives the
+  translate step. Routes: `POST /api/spanish/words/translate` → `SpanishWordController`
+  (returns `{setId, items:[{english,hint}]}`); `POST /api/spanish/words/check` →
+  grades by index (case/accent-insensitive), returns `{results:[{english,spanish,correct}]}`.
+  Neither endpoint writes JSONL or meta.json. The "practice missed" button POSTs
+  `/api/chat {coachType:'spanish', message:words}` with no topic, seeding a persisted
+  語 conversation with `OPENING_WITH_WORDS_NO_TOPIC`.
+- **`web/ChatController`** + `ApiExceptionHandler` — the nine route handlers (`/api/chat`
+  has JSON + multipart overloads, plus the two 字 word routes); the handler maps
   errors to `{"message": ...}` (FastAPI used `{"detail": ...}`) with idiomatic Spring
   codes (400 / 404 / 500 — Bean Validation failures return 400, where FastAPI returned 422).
 - **`config/AppConfig`** — `@ConfigurationProperties(coach.*)`: api key, `maxTokens`
