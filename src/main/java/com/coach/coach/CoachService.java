@@ -325,6 +325,7 @@ public class CoachService {
                 .map(line -> line.replaceFirst("\\s+-\\s+.*|[–—].*", ""))
                 .flatMap(line -> Arrays.stream(line.split(",")))
                 .map(String::trim)
+                .map(s -> s.replaceAll("^[^\\p{L}]+|[^\\p{L}]+$", ""))
                 .filter(s -> !s.isEmpty())
                 .toList();
     }
