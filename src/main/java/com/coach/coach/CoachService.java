@@ -3,6 +3,7 @@ package com.coach.coach;
 import com.coach.config.AppConfig;
 import com.coach.model.CoachType;
 import com.coach.web.InvalidRequestException;
+import com.coach.web.dto.TopicSection;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -134,7 +135,7 @@ public class CoachService {
 
     /** Validate topic membership and return the meta for a new Spanish conversation. */
     public CoachMeta startSpanish(String topic) {
-        if (!spanishTopics().contains(topic))
+        if (spanishTopics().stream().noneMatch(s -> s.topics().contains(topic)))
             throw new InvalidRequestException("Unknown Spanish topic: " + topic);
         return new CoachMeta(CoachType.SPANISH, null, topic);
     }
@@ -196,19 +197,47 @@ public class CoachService {
         }
     }
 
-    /** Topics from {@code coaches/Spanish/temas.txt}, trimmed and blanks skipped, in file order. */
-    public List<String> spanishTopics() {
-        Path path = coachesDir.resolve("Spanish").resolve("temas.txt");
+    /**
+     * Spanish topics as ordered level sections, one per {@code temas-<level>.txt} under
+     * {@code coaches/Spanish/} (e.g. {@code temas-b1.txt} → level {@code B1}), sorted by
+     * filename so levels ascend. Each file's lines are trimmed and blanks skipped, in
+     * file (workbook) order; empty files are dropped. No section at all is an error.
+     */
+    public List<TopicSection> spanishTopics() {
+        Path dir = coachesDir.resolve("Spanish");
+        try (Stream<Path> files = Files.list(dir)) {
+            var sections = files
+                    .filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().matches("(?i)temas-.+\\.txt"))
+                    .sorted()
+                    .map(p -> new TopicSection(levelOf(p), readTopicLines(p)))
+                    .filter(s -> !s.topics().isEmpty())
+                    .toList();
+            if (sections.isEmpty())
+                throw new IllegalStateException("No Spanish topics found: " + dir);
+            return sections;
+        } catch (IOException e) {
+            throw new IllegalStateException("No Spanish topics found: " + dir, e);
+        }
+    }
+
+    /** Level label from a {@code temas-<level>.txt} filename, e.g. {@code temas-b1.txt} → {@code B1}. */
+    private static String levelOf(Path path) {
+        return path.getFileName().toString()
+                .replaceFirst("(?i)^temas-", "")
+                .replaceFirst("(?i)\\.txt$", "")
+                .toUpperCase();
+    }
+
+    /** Non-blank, trimmed lines of a topic file, in file order. */
+    private static List<String> readTopicLines(Path path) {
         try {
-            var topics = Files.readAllLines(path).stream()
+            return Files.readAllLines(path).stream()
                     .map(String::trim)
                     .filter(s -> !s.isEmpty())
                     .toList();
-            if (topics.isEmpty())
-                throw new IllegalStateException("No Spanish topics found: " + path);
-            return topics;
         } catch (IOException e) {
-            throw new IllegalStateException("No Spanish topics found: " + path, e);
+            throw new UncheckedIOException(e);
         }
     }
 
