@@ -319,32 +319,34 @@ public class CoachService {
      */
     public List<String> parseWordList(String raw) {
         if (raw == null) return List.of();
-        return Arrays.stream(raw.split("[,\n]+"))
-                .map(s -> s.replaceFirst("\\s+-\\s+.*|[–—].*", ""))
+        // Strip a per-line "— translation" before splitting on commas, so a comma inside
+        // the (ignored) translation can't leak a bogus extra token.
+        return Arrays.stream(raw.split("\\R+"))
+                .map(line -> line.replaceFirst("\\s+-\\s+.*|[–—].*", ""))
+                .flatMap(line -> Arrays.stream(line.split(",")))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .toList();
     }
 
     /**
-     * Mask all but the first non-space character of each word in {@code word},
-     * replacing subsequent non-space characters with {@code ·} (U+00B7) and
-     * preserving spaces.
-     * <p>Examples: {@code cráneo} → {@code c·····},
-     * {@code caber en} → {@code c···· ··}.
+     * Reveal the first {@code ceil(len/4)} characters of each word in {@code word},
+     * replacing the rest with {@code ·} (U+00B7) and preserving spaces — so longer
+     * words expose several leading letters and every word shows at least its first.
+     * <p>Examples: {@code cráneo} → {@code cr····}, {@code caber en} → {@code ca··· e·},
+     * {@code ser compatible} → {@code s·· com·······}.
      */
     public String maskHint(String word) {
-        boolean first = true;
         var sb = new StringBuilder();
-        for (char c : word.toCharArray()) {
-            if (c == ' ') {
-                sb.append(' ');
-            } else if (first) {
-                sb.append(c);
-                first = false;
-            } else {
-                sb.append('·');
-            }
+        // Split into space-separated words (-1 keeps empty runs, so multiple/edge
+        // spaces round-trip), then reveal ceil(len/4) leading chars of each.
+        String[] words = word.split(" ", -1);
+        for (int p = 0; p < words.length; p++) {
+            if (p > 0) sb.append(' ');
+            String w = words[p];
+            int reveal = (w.length() + 3) / 4;       // ceil(len/4), ≥1 for a non-empty word
+            for (int k = 0; k < w.length(); k++)
+                sb.append(k < reveal ? w.charAt(k) : '·');
         }
         return sb.toString();
     }

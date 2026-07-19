@@ -487,8 +487,9 @@ header { display: none; }
 .sentence-cards { display: flex; flex-direction: column; gap: 0.5rem; }
 .sentence-card { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.6rem 0.8rem; background: var(--surface); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer; }
 .sentence-card:hover { background: var(--surface-hover); }
-.hint-icon { position: relative; flex-shrink: 0; width: 1.4rem; height: 1.4rem; display: flex; align-items: center; justify-content: center; border: 1px solid var(--coach-accent); border-radius: 50%; color: var(--coach-accent); font-size: 0.8rem; }
-.hint-icon:hover::after { content: attr(data-hint); position: absolute; bottom: calc(100% + 6px); right: 0; white-space: nowrap; background: var(--background); color: var(--coach-accent); border: 1px solid var(--coach-accent); border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.8rem; z-index: 10; }
+.hint-icon { position: relative; flex-shrink: 0; width: 1.4rem; height: 1.4rem; display: flex; align-items: center; justify-content: center; border: 1px solid var(--coach-accent); border-radius: 50%; color: var(--coach-accent); font-size: 0.8rem; cursor: pointer; }
+.hint-icon:hover::after, .hint-icon.revealed::after { content: attr(data-hint); position: absolute; bottom: calc(100% + 6px); right: 0; white-space: nowrap; background: var(--background); color: var(--coach-accent); border: 1px solid var(--coach-accent); border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.8rem; z-index: 10; }
+.hint-icon.revealed { background: var(--coach-accent); color: #fff; }
 
 /* ── 字 word-quiz rows ───────────────────────────────────────── */
 
@@ -501,8 +502,13 @@ header { display: none; }
 .word-row.correct .word-english { color: #2e7d32; }
 .word-row.incorrect { border-color: #c62828; }
 .word-row.incorrect .word-english { color: #c62828; }
+.word-row.hinted { border-color: #d4a017; }
+.word-row.hinted .word-english { color: #d4a017; }
+.word-row.hinted .word-grade { color: #d4a017; }
 .word-grade { font-size: 1rem; flex-shrink: 0; }
 .word-spanish-reveal { font-size: 0.8rem; color: var(--text-secondary); flex-shrink: 0; }
+.word-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+.word-actions button { flex: 1; }
 
 /* Responsive */
 

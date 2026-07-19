@@ -1319,6 +1319,18 @@ class ChatApiTest {
     }
 
     @Test
+    void topiclessSpanishConversationShowsVocabularioPreview() throws IOException {
+        // A 字 word-list seeded 語 session has no topic — the sidebar must still read meaningfully.
+        queueText("(cráneo) Use this skull.\n(pala) The shovel is big.");
+
+        postChat(spanishBody(null, "cráneo, pala"));
+
+        JsonNode items = json(rest.getForEntity(url("/api/conversations"), String.class));
+        assertThat(items.get(0).get("preview").asText()).isEqualTo("Español · Vocabulario");
+        assertThat(items.get(0).get("coachType").asText()).isEqualTo("spanish");
+    }
+
+    @Test
     void spanishFollowUpIsPassthroughWithPersonaSystemPrompt() throws IOException {
         writeSpanishTopics("Ser y estar");
         queueText("(caber) Only this matches.");
@@ -1923,18 +1935,57 @@ class ChatApiTest {
         node.get("items").forEach(item -> englishList.add(item.get("english").asText()));
         assertThat(englishList).containsExactlyInAnyOrder("fit", "dig", "shovel", "skull");
 
-        // Hints: first non-space char kept; rest replaced with · (U+00B7); spaces preserved
+        // Hints: ceil(len/4) leading chars of each word kept; rest → · (U+00B7); spaces preserved
         Map<String, String> expectedHint = Map.of(
-                "fit",    "c···· ··",   // caber en
-                "dig",    "c····",                  // cabar
+                "fit",    "ca··· e·",   // caber en
+                "dig",    "ca···",                  // cabar
                 "shovel", "p···",                        // pala
-                "skull",  "c·····");           // cráneo
+                "skull",  "cr····");           // cráneo
         node.get("items").forEach(item -> {
             String eng = item.get("english").asText();
             assertThat(item.get("hint").asText()).isEqualTo(expectedHint.get(eng));
         });
 
         assertThat(gatewayCalls).hasSize(1);
+    }
+
+    @Test
+    void spanishWordsTranslate_hintRevealsStartOfEachWord() {
+        // Each word shows its first letter(s); longer words reveal more (ceil(len/4)).
+        queueText("(ser compatible) to be compatible\n(corresponder) to reciprocate");
+
+        var resp = postTranslate(Map.of("words", "ser compatible, corresponder"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        Map<String, String> hintByEnglish = new java.util.HashMap<>();
+        json(resp).get("items").forEach(item ->
+                hintByEnglish.put(item.get("english").asText(), item.get("hint").asText()));
+        assertThat(hintByEnglish.get("to be compatible")).isEqualTo("s·· com·······");
+        assertThat(hintByEnglish.get("to reciprocate")).isEqualTo("cor·········");
+    }
+
+    @Test
+    void spanishWordsTranslate_stripsTranslationBeforeSplittingOnComma() {
+        // A comma inside the (ignored) translation must not fabricate a 5th "Spanish" word.
+        // The scripted reply even offers a 5th line; the fix keeps the LLM input at 4 tokens.
+        queueText("(Tomar medidas) to take measures\n(Jugárselo) to risk it all\n"
+                + "(Estar regulado) to be regulated\n(Fiarse) to trust\n"
+                + "(Arriesgarlo todo) to put everything on the line");
+
+        String words = "Tomar medidas — вживати заходів\n"
+                + "Jugárselo — ризикувати всім, ставити все на карту\n"
+                + "Estar regulado — бути врегульованим\n"
+                + "Fiarse — довіряти";
+        var resp = postTranslate(Map.of("words", words));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(resp).get("items")).hasSize(4);
+        assertThat(gatewayCalls).hasSize(1);
+
+        // The LLM receives exactly the four clean Spanish tokens — no Cyrillic, no phantom line.
+        GatewayCall call = gatewayCalls.get(0);
+        assertThat(textOf(call.messages().get(0)))
+                .isEqualTo("Tomar medidas\nJugárselo\nEstar regulado\nFiarse");
     }
 
     @Test
@@ -1966,6 +2017,68 @@ class ChatApiTest {
         }
         assertThat(correctCount).isEqualTo(3);
         assertThat(gatewayCalls).hasSize(1);  // no extra gateway call for check
+    }
+
+    @Test
+    void spanishWordsTranslate_itemsCarryFullSpanish() {
+        // Each item ships the full Spanish word (for click-to-reveal) alongside the masked hint.
+        queueText("(caber en) to fit\n(cráneo) skull");
+
+        var resp = json(postTranslate(Map.of("words", "caber en, cráneo")));
+
+        Map<String, String> spanishByEnglish = new HashMap<>();
+        Map<String, String> hintByEnglish = new HashMap<>();
+        for (JsonNode item : resp.get("items")) {
+            spanishByEnglish.put(item.get("english").asText(), item.get("spanish").asText());
+            hintByEnglish.put(item.get("english").asText(), item.get("hint").asText());
+        }
+        assertThat(spanishByEnglish.get("to fit")).isEqualTo("caber en");
+        assertThat(spanishByEnglish.get("skull")).isEqualTo("cráneo");
+        assertThat(hintByEnglish.get("skull")).isEqualTo("cr····");  // hint stays masked
+    }
+
+    @Test
+    void spanishWordsCheck_fullHintUsed_setsFullHintFlag() {
+        queueText("(caber en) to fit\n(cráneo) skull");
+        var translateResp = json(postTranslate(Map.of("words", "caber en, cráneo")));
+        String setId = translateResp.get("setId").asText();
+
+        // Answer both correctly (using the payload's full word); flag only the first row.
+        List<String> answers = new ArrayList<>();
+        List<Boolean> hintsUsed = new ArrayList<>();
+        for (JsonNode item : translateResp.get("items")) {
+            answers.add(item.get("spanish").asText());
+            hintsUsed.add(answers.size() == 1);
+        }
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", setId);
+        checkBody.put("answers", answers);
+        checkBody.put("hintsUsed", hintsUsed);
+        var results = json(postCheck(checkBody)).get("results");
+
+        assertThat(results).hasSize(2);
+        assertThat(results.get(0).get("correct").asBoolean()).isTrue();
+        assertThat(results.get(0).get("fullHint").asBoolean()).isTrue();
+        assertThat(results.get(1).get("correct").asBoolean()).isTrue();
+        assertThat(results.get(1).get("fullHint").asBoolean()).isFalse();
+        assertThat(gatewayCalls).hasSize(1);  // grading uses no LLM
+    }
+
+    @Test
+    void spanishWordsCheck_fullHintButWrong_isIncorrect() {
+        queueText("(cráneo) skull");
+        var translateResp = json(postTranslate(Map.of("words", "cráneo")));
+        String setId = translateResp.get("setId").asText();
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", setId);
+        checkBody.put("answers", List.of("wrong"));
+        checkBody.put("hintsUsed", List.of(true));
+        var result = json(postCheck(checkBody)).get("results").get(0);
+
+        assertThat(result.get("correct").asBoolean()).isFalse();  // red dominates
+        assertThat(result.get("fullHint").asBoolean()).isTrue();
     }
 
     @Test

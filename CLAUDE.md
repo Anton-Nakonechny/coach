@@ -74,16 +74,22 @@ history** rebuilt from disk.
   provides `normalizeKey` (NFD + strip diacritics + lowercase + trim). SPANISH with
   blank/null topic → `startSpanish(null)` → `CoachMeta(SPANISH, null, null)`,
   system prompt = `SPANISH_PERSONA` only (no topic clause). `parseWordList` splits
-  on commas/newlines, strips dash-comments, trims. `maskHint` keeps first non-space
-  char, replaces the rest with `·` (U+00B7). `pairTranslations` calls `SentenceParser`
+  on commas/newlines (dash-comment stripped per line before the comma split), trims.
+  `maskHint` reveals the first `ceil(len/4)` chars of each word, masks the rest with
+  `·` (U+00B7), preserves spaces. `pairTranslations` calls `SentenceParser`
   on the LLM output and matches echoed español back to the original tokens via
   `normalizeKey` with positional fallback. `WORD_TRANSLATE_SYSTEM` drives the
   translate step. Routes: `POST /api/spanish/words/translate` → `SpanishWordController`
-  (returns `{setId, items:[{english,hint}]}`); `POST /api/spanish/words/check` →
-  grades by index (case/accent-insensitive), returns `{results:[{english,spanish,correct}]}`.
-  Neither endpoint writes JSONL or meta.json. The "practice missed" button POSTs
+  (returns `{setId, items:[{english,hint,spanish}]}` — the full `spanish` ships so the
+  client can reveal it when the user clicks the hint icon); `POST /api/spanish/words/check`
+  takes `{setId,answers,hintsUsed}` and grades by index (case/accent-insensitive, no LLM),
+  returning `{results:[{english,spanish,correct,fullHint}]}`. Client tri-state: green =
+  correct & no hint, yellow = correct but full hint, red = wrong; the review set carried
+  into the next practice = red ∪ yellow (only clean-correct words drop). Neither endpoint
+  writes JSONL or meta.json. The "practice missed" button (and the 語/字 toggle) POST
   `/api/chat {coachType:'spanish', message:words}` with no topic, seeding a persisted
-  語 conversation with `OPENING_WITH_WORDS_NO_TOPIC`.
+  語 conversation with `OPENING_WITH_WORDS_NO_TOPIC`; "De nuevo 字" restarts a 字 quiz
+  over all words.
 - **`web/ChatController`** + `ApiExceptionHandler` — the nine route handlers (`/api/chat`
   has JSON + multipart overloads, plus the two 字 word routes); the handler maps
   errors to `{"message": ...}` (FastAPI used `{"detail": ...}`) with idiomatic Spring

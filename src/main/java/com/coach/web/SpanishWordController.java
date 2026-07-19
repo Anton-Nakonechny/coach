@@ -67,7 +67,8 @@ public class SpanishWordController {
 
         String setId = wordSetStore.put(shuffled);
         List<WordPrompt> items = shuffled.stream()
-                .map(p -> new WordPrompt(p.english(), coachService.maskHint(p.spanishOriginal())))
+                .map(p -> new WordPrompt(p.english(), coachService.maskHint(p.spanishOriginal()),
+                        p.spanishOriginal()))
                 .toList();
         return new WordTranslateResponse(setId, items);
     }
@@ -82,13 +83,15 @@ public class SpanishWordController {
                 .orElseThrow(() -> new ConversationNotFoundException("Word set expired — start again."));
 
         List<String> answers = request.answers() != null ? request.answers() : List.of();
+        List<Boolean> hintsUsed = request.hintsUsed() != null ? request.hintsUsed() : List.of();
         List<WordResult> results = new ArrayList<>();
         for (int i = 0; i < pairs.size(); i++) {
             WordPair pair = pairs.get(i);
             String answer = i < answers.size() ? answers.get(i) : "";
             boolean correct = !answer.isBlank()
                     && Text.normalizeKey(answer).equals(Text.normalizeKey(pair.spanishOriginal()));
-            results.add(new WordResult(pair.english(), pair.spanishOriginal(), correct));
+            boolean fullHint = i < hintsUsed.size() && Boolean.TRUE.equals(hintsUsed.get(i));
+            results.add(new WordResult(pair.english(), pair.spanishOriginal(), correct, fullHint));
         }
         return new WordCheckResponse(results);
     }

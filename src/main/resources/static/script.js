@@ -93,14 +93,8 @@ function setupEventListeners() {
     // Crossing the breakpoint (rotation, resize) clears drawer state so the
     // desktop layout never inherits a stale .open class or visible backdrop.
     mobileQuery.addEventListener('change', (e) => { if (!e.matches) closeDrawers(); });
-    // 語/字 mode toggle
-    spanishModeToggle.querySelectorAll('.mode-btn').forEach(btn =>
-        btn.addEventListener('click', () => {
-            const mode = btn.dataset.mode;
-            if (mode === spanishMode) return;
-            setSpanishMode(mode);
-            onCoachSelected('spanish');
-        }));
+    // 語/字 mode toggle — a click anywhere on the chip flips between the two modes
+    spanishModeToggle.addEventListener('click', switchSpanishMode);
 }
 
 function setSpanishMode(mode) {
@@ -111,6 +105,21 @@ function setSpanishMode(mode) {
         b.classList.toggle('active', active);
         b.setAttribute('aria-pressed', String(active));
     });
+}
+
+// Flip 語↔字. Clicking the chip also selects the Español coach. Right after word
+// feedback, the flip re-drills the missed words — into 語 sentence practice or a fresh
+// 字 quiz — the same outcome as the two in-dialog buttons.
+function switchSpanishMode() {
+    setCoachRadio('spanish');
+    const next = spanishMode === 'words' ? 'language' : 'words';
+    setSpanishMode(next);
+    if (pendingMissedWords && pendingMissedWords.length) {
+        if (next === 'language') practiceMissed(pendingMissedWords);
+        else retryMissedInWords(pendingMissedWords);
+    } else {
+        onCoachSelected('spanish');
+    }
 }
 
 // ── Mobile drawers ───────────────────────────────────────────
@@ -155,8 +164,7 @@ async function onCoachSelected(value) {
     coachNote.textContent = '';
     activeSetup = null;
     selectedTopic = null;
-    // Show the 語/字 toggle only when the Español radio is selected
-    if (spanishModeToggle) spanishModeToggle.hidden = (value !== 'spanish');
+    pendingMissedWords = null;  // a fresh coach entry ends any pending word drill
     if (value === 'none') {
         startNewChat();
         return;
@@ -226,11 +234,16 @@ async function enterSpanishSetup() {
     if (topics) spanishTopics = topics;
 }
 
-function enterWordsSetup() {
+// Clear the chat pane back to an in-panel setup screen — no conversation open.
+function resetToSetup() {
     currentConversationId = null;
     chatMessages.innerHTML = '';
     highlightActiveConversation();
     coachNote.textContent = '';
+}
+
+function enterWordsSetup() {
+    resetToSetup();
     pendingMissedWords = null;
     addMessage('Modo 字 — vocabulario. Escribe o pega palabras en español separadas por comas.', 'assistant');
     activeSetup = 'spanish-words';
@@ -239,10 +252,7 @@ function enterWordsSetup() {
 // Render a coach's topic grid, lazily fetching (and returning) its topic list.
 // Returns null if loading failed, so the caller keeps its existing cache.
 async function enterTopicSetup({ welcome, setupName, endpoint, gridId, cached, onPick, render = renderTopicGrid }) {
-    currentConversationId = null;
-    chatMessages.innerHTML = '';
-    highlightActiveConversation();
-    coachNote.textContent = '';
+    resetToSetup();
     addMessage(welcome, 'assistant');
     activeSetup = setupName;
 
@@ -676,7 +686,7 @@ async function translateWords(words) {
     sendButton.disabled = true;
     attachButton.disabled = true;
 
-    addMessage(words, 'user');
+    // The pasted list is not echoed as a message — it would reveal the español we quiz on.
     const loadingMessage = createLoadingMessage();
     chatMessages.appendChild(loadingMessage);
     chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -720,6 +730,14 @@ function buildWordCheck(setId, items) {
         hint.dataset.hint = item.hint;
         hint.textContent = '?';
         hint.title = item.hint;
+        // Clicking escalates the partial hint to the full word (a "full hint"), pins the
+        // tooltip, and flags the row so the grade counts it as yellow even when correct.
+        hint.addEventListener('click', () => {
+            hint.dataset.hint = item.spanish;
+            hint.title = item.spanish;
+            hint.classList.add('revealed');
+            row.dataset.fullHint = 'true';
+        });
 
         const input = document.createElement('input');
         input.type = 'text';
@@ -756,13 +774,14 @@ function buildWordCheck(setId, items) {
 
 async function checkWords(setId, rows) {
     const answers = rows.map(r => r.querySelector('.word-answer').value);
+    const hintsUsed = rows.map(r => r.dataset.fullHint === 'true');
     rows.forEach(r => { r.querySelector('.word-answer').disabled = true; });
 
     try {
         const resp = await fetch(`${API_URL}/spanish/words/check`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ setId, answers }),
+            body: JSON.stringify({ setId, answers, hintsUsed }),
         });
         if (resp.status === 404) {
             addMessage('El conjunto de palabras ha expirado. Vuelve a introducir las palabras.', 'assistant');
@@ -773,11 +792,12 @@ async function checkWords(setId, rows) {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.message || 'Error checking answers');
 
-        const missed = [];
         data.results.forEach((result, i) => {
             const row = rows[i];
             if (!row) return;
-            row.classList.add(result.correct ? 'correct' : 'incorrect');
+            // Tri-state: green = correct w/o hint, yellow = correct but full hint, red = wrong.
+            const state = !result.correct ? 'incorrect' : result.fullHint ? 'hinted' : 'correct';
+            row.classList.add(state);
 
             const grade = document.createElement('span');
             grade.className = 'word-grade';
@@ -789,23 +809,51 @@ async function checkWords(setId, rows) {
                 reveal.className = 'word-spanish-reveal';
                 reveal.textContent = result.spanish;
                 row.appendChild(reveal);
-                missed.push(result.spanish);
             }
         });
 
-        if (missed.length > 0) {
-            const practiceBtn = document.createElement('button');
-            practiceBtn.className = 'topic-button';
-            practiceBtn.style.marginTop = '0.5rem';
-            practiceBtn.textContent = `Practicar las ${missed.length} fallada${missed.length === 1 ? '' : 's'} en modo 語`;
-            practiceBtn.addEventListener('click', () => practiceMissed(missed));
-            const container = rows[0].closest('.word-check');
-            if (container) container.appendChild(practiceBtn);
+        // Review set = wrong OR full-hint words; only clean-correct words are dropped.
+        const review = data.results.filter(r => !r.correct || r.fullHint).map(r => r.spanish);
+        const all = data.results.map(r => r.spanish);
+        pendingMissedWords = review.length > 0 ? review : null;
+
+        const actions = document.createElement('div');
+        actions.className = 'word-actions';
+        if (review.length > 0) {
+            actions.appendChild(missedButton(review, '語', () => practiceMissed(review)));
+            actions.appendChild(missedButton(review, '字', () => retryMissedInWords(review)));
         }
+        const again = document.createElement('button');
+        again.className = 'topic-button';
+        again.textContent = 'De nuevo 字';
+        again.addEventListener('click', () => retryMissedInWords(all));
+        actions.appendChild(again);
+        const container = rows[0].closest('.word-check');
+        if (container) container.appendChild(actions);
     } catch (err) {
         addMessage(`Error: ${err.message}`, 'assistant');
         rows.forEach(r => { r.querySelector('.word-answer').disabled = false; });
     }
+}
+
+// A result button whose grammar agrees with the miss count (1 → "la falla", N → "las N fallas").
+function missedButton(missed, glyph, onClick) {
+    const btn = document.createElement('button');
+    btn.className = 'topic-button';
+    btn.textContent = missed.length === 1
+        ? `Practicar la falla en modo ${glyph}`
+        : `Practicar las ${missed.length} fallas en modo ${glyph}`;
+    btn.addEventListener('click', onClick);
+    return btn;
+}
+
+// Restart a 字 quiz seeded with only the given (failed) Spanish words.
+function retryMissedInWords(words) {
+    setCoachRadio('spanish');
+    setSpanishMode('words');
+    resetToSetup();
+    activeSetup = 'spanish-words';
+    translateWords(words.join(', '));
 }
 
 async function practiceMissed(words) {
@@ -1014,7 +1062,6 @@ function startNewChat() {
     addMessage("New chat. Pick a model on the left and ask me anything.", 'assistant');
     highlightActiveConversation();
     setCoachRadio('none');
-    if (spanishModeToggle) spanishModeToggle.hidden = true;
     coachNote.textContent = '';
     chatInput.focus();
 }
