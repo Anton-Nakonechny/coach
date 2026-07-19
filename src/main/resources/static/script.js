@@ -747,7 +747,7 @@ function buildWordCheck(setId, items) {
         input.placeholder = 'español…';
         input.style.minWidth = inputMinWidth;
         input.addEventListener('keydown', e => {
-            if (e.key === 'Enter') { e.preventDefault(); checkWords(setId, rows); }
+            if (e.key === 'Enter') { e.preventDefault(); checkWords(setId, rows, checkBtn); }
         });
 
         row.appendChild(english);
@@ -761,7 +761,7 @@ function buildWordCheck(setId, items) {
     checkBtn.className = 'topic-button';
     checkBtn.textContent = 'Comprobar ✓';
     checkBtn.style.alignSelf = 'flex-start';
-    checkBtn.addEventListener('click', () => checkWords(setId, rows));
+    checkBtn.addEventListener('click', () => checkWords(setId, rows, checkBtn));
     container.appendChild(checkBtn);
 
     const msgDiv = document.createElement('div');
@@ -775,7 +775,7 @@ function buildWordCheck(setId, items) {
     if (rows.length > 0) rows[0].querySelector('.word-answer').focus();
 }
 
-async function checkWords(setId, rows) {
+async function checkWords(setId, rows, checkBtn) {
     const answers = rows.map(r => r.querySelector('.word-answer').value);
     const hintsUsed = rows.map(r => r.dataset.fullHint === 'true');
     rows.forEach(r => { r.querySelector('.word-answer').disabled = true; });
@@ -831,6 +831,7 @@ async function checkWords(setId, rows) {
         again.textContent = 'De nuevo 字';
         again.addEventListener('click', () => retryMissedInWords(all));
         actions.appendChild(again);
+        if (checkBtn) checkBtn.hidden = true;
         const container = rows[0].closest('.word-check');
         if (container) container.appendChild(actions);
     } catch (err) {
