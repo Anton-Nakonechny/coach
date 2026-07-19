@@ -1035,7 +1035,7 @@ function buildSentenceCards(sentences) {
         const card = e.target.closest('.sentence-card');
         if (!card) return;
         const sep = chatInput.value.trimEnd() ? '\n' : '';
-        chatInput.value = chatInput.value.trimEnd() + sep + card.dataset.sentence;
+        chatInput.value = chatInput.value.trimEnd() + sep + card.dataset.sentence + '\n';
         autoResize();
         chatInput.focus();
     });
