@@ -7,14 +7,12 @@ public record CoachMeta(CoachType coachType, String promptFile, String topic) {
 
     /** Sidebar label: Spanish shows the topic; COO shows the scenario filename; Claude Architect shows the stem. */
     public String preview() {
-        if (coachType == CoachType.SPANISH)
-            return coachType.shortLabel() + " · " + topic;
-        if (coachType == CoachType.CLAUDE_ARCHITECT)
-            return coachType.shortLabel() + " · " + promptFile.replaceFirst("(?i)\\.md$", "");
-        String scenario = promptFile
-                .replaceFirst("(?i)\\.md$", "")
-                .replaceFirst("^\\d+-", "")
-                .replace('-', ' ');
-        return coachType.shortLabel() + " · " + scenario;
+        String stem = promptFile != null ? promptFile.replaceFirst("(?i)\\.md$", "") : "";
+        String suffix = switch (coachType) {
+            case SPANISH -> topic;
+            case CLAUDE_ARCHITECT -> stem;
+            default -> stem.replaceFirst("^\\d+-", "").replace('-', ' ');
+        };
+        return coachType.shortLabel() + " · " + suffix;
     }
 }

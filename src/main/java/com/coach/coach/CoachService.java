@@ -183,7 +183,12 @@ public class CoachService {
         Path scenario = coachDir(meta.coachType()).resolve(safe);
         if (!Files.isRegularFile(scenario))
             throw new IllegalStateException("The coach scenario for this conversation is no longer available.");
-        var persona = meta.coachType() == CoachType.CLAUDE_ARCHITECT ? CLAUDE_PERSONA : COO_PERSONA;
+        var persona = switch (meta.coachType()) {
+            case CHIEF_OPERATING_OFFICER -> COO_PERSONA;
+            case CLAUDE_ARCHITECT -> CLAUDE_PERSONA;
+            case SPANISH, NONE -> throw new IllegalStateException(
+                    "No file-based persona for coach " + meta.coachType());
+        };
         try {
             return persona + "\n\n" + Files.readString(scenario);
         } catch (IOException e) {

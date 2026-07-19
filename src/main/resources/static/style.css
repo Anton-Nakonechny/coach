@@ -19,6 +19,7 @@
     --radius: 12px;
     --focus-ring: rgba(37, 99, 235, 0.2);
     --coach-accent: darkorange;
+    --claude-accent: #eee2c7;
 }
 
 body {
@@ -719,3 +720,22 @@ header { display: none; }
     overflow: hidden;
     text-overflow: ellipsis;
 }
+
+/* ── Claude Architect conversations: cream/parchment ─────────────────────── */
+.conversation-item.claude-chat {
+    color: var(--claude-accent);
+    border-color: rgba(238, 226, 199, 0.45);
+}
+.conversation-item.claude-chat:hover,
+.conversation-item.claude-chat.active { border-color: var(--claude-accent); color: var(--claude-accent); }
+
+/* ── Claude Architect quiz blocks ────────────────────────────────────────── */
+.quiz-stem { white-space: pre-wrap; }
+.quiz-options { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; }
+.quiz-option { padding: 0.5rem 0.75rem; text-align: left; background: var(--background); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); font-size: 0.875rem; cursor: pointer; }
+.quiz-option:not(:disabled):hover { border-color: var(--claude-accent); color: var(--claude-accent); }
+.quiz-option:disabled { cursor: default; color: var(--text-secondary); }
+.quiz-option.chosen { border-color: var(--claude-accent); color: var(--claude-accent); }
+.next-question-row { margin-top: 0.6rem; }
+.next-question { padding: 0.5rem 0.9rem; background: var(--surface); border: 1px solid var(--claude-accent); border-radius: 8px; color: var(--claude-accent); font-size: 0.875rem; cursor: pointer; }
+.next-question:hover { background: var(--surface-hover); }
