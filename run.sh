@@ -8,4 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 echo "Starting Coach web app ..."
-exec mvn -pl coach-web -am spring-boot:run
+# `spring-boot:run` is a direct CLI goal, so `-am` would also run it on coach-parent /
+# coach-core (no main class) and fail before the web app boots. Build the reactor once
+# with `-am install`, then run ONLY coach-web without `-am`.
+mvn -pl coach-web -am -DskipTests install
+exec mvn -pl coach-web spring-boot:run

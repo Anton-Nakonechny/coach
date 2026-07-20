@@ -26,11 +26,15 @@ root dir so relative `coaches/` / `conversations/` / `.env.key` resolve.
 ```bash
 mvn test                           # run the whole reactor's JUnit 5 suites
 ./run.sh                           # coach-web (9999); Spring loads the key from .env.key
-mvn -pl coach-web -am spring-boot:run   # same as run.sh
 ./run-mcp.sh                       # coach-mcp (9998); no API key needed
-mvn -pl coach-mcp -am spring-boot:run   # same as run-mcp.sh
 mvn -pl coach-web test -Dtest=ChatApiTest#chatMintsConversationAndReturnsAnswer  # single test
 ```
+
+`run.sh` / `run-mcp.sh` build the reactor once (`mvn -pl coach-X -am -DskipTests
+install`) and then run only the leaf module (`mvn -pl coach-X spring-boot:run`, no
+`-am`). Don't collapse that into `mvn -pl coach-X -am spring-boot:run`: `spring-boot:run`
+is a direct CLI goal, so `-am` runs it on `coach-parent` / `coach-core` too — they have
+no main class and the build fails before the app boots.
 
 `coach-web` reads `ANTHROPIC_API_KEY` from the environment; `coach-mcp` never
 makes an LLM call so needs no key; the test suites don't need one (the SDK gateway
