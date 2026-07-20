@@ -10,6 +10,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Map;
 
@@ -18,7 +19,7 @@ import java.util.Map;
  * with idiomatic Spring status codes:
  * <ul>
  *   <li>bad request body (Bean Validation, unknown model at deserialization) → 400</li>
- *   <li>conversation not found → 404</li>
+ *   <li>conversation not found, or an unmapped route → 404</li>
  *   <li>any other failure (e.g. upstream Anthropic error) → 500</li>
  * </ul>
  */
@@ -55,6 +56,12 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(ConversationNotFoundException.class)
     public ResponseEntity<Map<String, Object>> handleNotFound(ConversationNotFoundException ex) {
+        return body(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+
+    /** An unmapped route (no controller, no static resource) → 404, not the catch-all 500. */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleNoResource(NoResourceFoundException ex) {
         return body(HttpStatus.NOT_FOUND, ex.getMessage());
     }
 
