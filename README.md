@@ -25,13 +25,13 @@ A thin Claude chat client built with Spring Boot 3.5 / Java 21 and the official 
 # Set up your API key
 echo "ANTHROPIC_API_KEY=sk-..." > .env.key
 
-# Run the application
-mvn spring-boot:run
-# or use the convenience script
+# Run the application (builds the reactor, then runs only coach-web)
 ./run.sh
+# or, equivalently:
+mvn -pl coach-web -am -DskipTests install && mvn -pl coach-web spring-boot:run
 ```
 
-The app will start on the port configured in `src/main/resources/application.yml` and serve the UI at `http://localhost:9999`.
+The app will start on the port configured in `coach-web/src/main/resources/application.yml` and serve the UI at `http://localhost:9999`.
 
 ### Running tests
 

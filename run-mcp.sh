@@ -9,4 +9,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 echo "Starting Coach MCP server ..."
-exec mvn -pl coach-mcp -am spring-boot:run
+# `spring-boot:run` is a direct CLI goal, so `-am` would also run it on coach-parent /
+# coach-core (no main class) and fail before the MCP app boots. Build the reactor once
+# with `-am install`, then run ONLY coach-mcp without `-am`.
+mvn -pl coach-mcp -am -DskipTests install
+exec mvn -pl coach-mcp spring-boot:run
