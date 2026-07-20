@@ -22,7 +22,8 @@ import java.util.function.Function;
  * configured TTL is served from {@code coach.docs.cache-dir} without hitting the
  * network; otherwise it is (re)loaded, stored, and returned. The cache is best-effort —
  * any read/write failure degrades to a live load rather than propagating. A load
- * failure is never cached, so a transient outage does not poison the snapshot.
+ * failure is never cached, so a transient outage does not poison the snapshot; when a
+ * reload fails but a stale snapshot is on disk, that copy is served rather than failing.
  */
 @Component
 public class DocsCache {
@@ -37,26 +38,50 @@ public class DocsCache {
         this.ttl = config.docs().ttl();
     }
 
-    /** Fresh cached snapshot for {@code url}, else {@code loader}'s result, stored then returned. */
+    /**
+     * Fresh cached snapshot for {@code url}, else {@code loader}'s result stored then
+     * returned. When the reload fails but a stale snapshot is on disk, that copy is
+     * served; a failure with no snapshot to fall back on rethrows.
+     */
     public String fetch(URI url, Function<URI, String> loader) {
         Path file = dir.resolve(key(url) + ".md");
         Optional<String> fresh = readFresh(file);
         if (fresh.isPresent())
             return fresh.get();
-        String content = loader.apply(url);
-        store(file, content);
-        return content;
+        try {
+            String content = loader.apply(url);
+            store(file, content);
+            return content;
+        } catch (RuntimeException e) {
+            Optional<String> stale = read(file);
+            if (stale.isEmpty())
+                throw e;
+            log.warn("Serving stale doc snapshot {} after reload failure: {}", file, e.toString());
+            return stale.get();
+        }
     }
 
     /** Cached body if the snapshot exists and is younger than the TTL; empty otherwise. */
     private Optional<String> readFresh(Path file) {
+        if (isFresh(file))
+            return read(file);
+        return Optional.empty();
+    }
+
+    private boolean isFresh(Path file) {
         try {
-            if (Files.notExists(file))
-                return Optional.empty();
-            Instant modified = Files.getLastModifiedTime(file).toInstant();
-            if (modified.isBefore(Instant.now().minus(ttl)))
-                return Optional.empty();
-            return Optional.of(Files.readString(file));
+            return Files.exists(file)
+                    && Files.getLastModifiedTime(file).toInstant().isAfter(Instant.now().minus(ttl));
+        } catch (IOException e) {
+            log.warn("Ignoring unreadable doc cache {}: {}", file, e.toString());
+            return false;
+        }
+    }
+
+    /** Snapshot body regardless of age; empty when it is missing or unreadable. */
+    private static Optional<String> read(Path file) {
+        try {
+            return Files.exists(file) ? Optional.of(Files.readString(file)) : Optional.empty();
         } catch (IOException e) {
             log.warn("Ignoring unreadable doc cache {}: {}", file, e.toString());
             return Optional.empty();

@@ -36,8 +36,12 @@ import org.springframework.util.MultiValueMap;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -123,6 +127,7 @@ class ChatApiTest {
     private final List<GatewayCall> gatewayCalls = new ArrayList<>();
     private final List<FakeUpload> uploads = new ArrayList<>();
     private final List<String> deleted = new ArrayList<>();
+    private final List<URI> docFetches = new ArrayList<>();
     private int uploadSeq;
     final ObjectMapper mapper = new ObjectMapper();
 
@@ -1223,11 +1228,23 @@ class ChatApiTest {
             -->
             STOP_REASON DRILL""".formatted(DOC_URL_TOOLS, DOC_URL_STOP);
 
-    /** Script the docs fetch to return a distinct body per URL. */
+    /** Script the docs fetch to return a distinct body per URL, recording each call. */
     private void scriptDocFetch() {
-        doAnswer(inv -> inv.getArgument(0).toString().contains("stop-reasons")
-                ? "STOP REASONS DOC BODY" : "TOOL USE DOC BODY")
-                .when(docFetchGateway).fetch(any());
+        doAnswer(inv -> {
+            URI url = inv.getArgument(0);
+            docFetches.add(url);
+            return url.toString().contains("stop-reasons")
+                    ? "STOP REASONS DOC BODY" : "TOOL USE DOC BODY";
+        }).when(docFetchGateway).fetch(any());
+    }
+
+    /** Push every doc snapshot's mtime {@code age} into the past. */
+    private static void ageSnapshots(Duration age) throws IOException {
+        var past = FileTime.from(Instant.now().minus(age));
+        try (var snapshots = Files.list(claudeDir().resolve("docs"))) {
+            for (Path snapshot : snapshots.toList())
+                Files.setLastModifiedTime(snapshot, past);
+        }
     }
 
     private String lastSystem() {
@@ -1287,6 +1304,49 @@ class ChatApiTest {
         var first = gatewayCalls.get(gatewayCalls.size() - 2).system();
         assertThat(first).contains("TOOL USE DOC BODY");
         assertThat(lastSystem()).isEqualTo(first);
+    }
+
+    @Test
+    void claudeSecondConversationReusesDocSnapshots() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", SOURCED_BLUEPRINT);
+        scriptDocFetch();
+
+        postChat(claudeBody("1.1 Agentic loops"));
+        postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(docFetches).hasSize(2); // one per URL, not per conversation
+        assertThat(lastSystem()).contains("TOOL USE DOC BODY");
+        try (var snapshots = Files.list(claudeDir().resolve("docs"))) {
+            assertThat(snapshots.count()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void claudeExpiredSnapshotIsRefetched() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", SOURCED_BLUEPRINT);
+        scriptDocFetch();
+        postChat(claudeBody("1.1 Agentic loops"));
+
+        ageSnapshots(Duration.ofHours(25)); // past the 24h TTL
+        postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(docFetches).hasSize(4);
+        assertThat(lastSystem()).contains("TOOL USE DOC BODY");
+    }
+
+    @Test
+    void claudeStaleSnapshotServesWhenDocFetchFails() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", SOURCED_BLUEPRINT);
+        scriptDocFetch();
+        postChat(claudeBody("1.1 Agentic loops"));
+
+        ageSnapshots(Duration.ofHours(25));
+        doThrow(new RuntimeException("docs down")).when(docFetchGateway).fetch(any());
+        var resp = postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(lastSystem()).contains("TOOL USE DOC BODY");
+        assertThat(lastSystem()).contains("STOP REASONS DOC BODY");
     }
 
     @Test
