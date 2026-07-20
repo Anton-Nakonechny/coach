@@ -2386,4 +2386,10 @@ class ChatApiTest {
         var js = rest.getForObject(url("/script.js"), String.class);
         assertThat(js).contains("card.dataset.sentence + '\\n'");
     }
+
+    @Test
+    void scriptJs_markedRenderer_opensLinksInNewTab() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js).contains("target=\"_blank\" rel=\"noopener noreferrer\"");
+    }
 }
