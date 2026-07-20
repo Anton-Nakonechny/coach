@@ -2,6 +2,7 @@ package com.coach.anthropic;
 
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.core.JsonValue;
+import com.anthropic.models.beta.messages.BetaCacheControlEphemeral;
 import com.anthropic.models.beta.messages.BetaContentBlockParam;
 import com.anthropic.models.beta.messages.BetaFileDocumentSource;
 import com.anthropic.models.beta.messages.BetaFileImageSource;
@@ -43,12 +44,31 @@ public class SdkAnthropicGateway {
     public List<AnthropicBlock> createMessage(String modelId, int maxTokens, String system,
                                               List<ApiMessage> messages,
                                               Map<String, Object> extraBody) {
+        BetaMessage response = client.beta().messages()
+                .create(buildParams(modelId, maxTokens, system, messages, extraBody));
+
+        return response.content().stream()
+                .flatMap(block -> block.text().stream())
+                .map(text -> new AnthropicBlock(AnthropicBlock.TYPE_TEXT, text.text()))
+                .toList();
+    }
+
+    /** Request params for one turn; package-private so tests can inspect what would be sent. */
+    static MessageCreateParams buildParams(String modelId, int maxTokens, String system,
+                                           List<ApiMessage> messages, Map<String, Object> extraBody) {
         MessageCreateParams.Builder builder = MessageCreateParams.builder()
                 .model(modelId)
                 .maxTokens(maxTokens)
                 .addBeta(FILES_BETA);
 
-        if (system != null && !system.isBlank()) builder.system(system);
+        // The system prompt repeats verbatim across a conversation's turns (persona +
+        // scenario + stuffed docs), so send it as a cache_control block: follow-up
+        // turns read the prefix from the prompt cache instead of re-billing it.
+        if (system != null && !system.isBlank())
+            builder.systemOfBetaTextBlockParams(List.of(BetaTextBlockParam.builder()
+                    .text(system)
+                    .cacheControl(BetaCacheControlEphemeral.builder().build())
+                    .build()));
 
         for (ApiMessage turn : messages) {
             BetaMessageParam.Role role = "assistant".equals(turn.role())
@@ -64,12 +84,7 @@ public class SdkAnthropicGateway {
         // extra body fields apply (thinking / output_config) as raw JSON.
         extraBody.forEach((key, value) -> builder.putAdditionalBodyProperty(key, JsonValue.from(value)));
 
-        BetaMessage response = client.beta().messages().create(builder.build());
-
-        return response.content().stream()
-                .flatMap(block -> block.text().stream())
-                .map(text -> new AnthropicBlock(AnthropicBlock.TYPE_TEXT, text.text()))
-                .toList();
+        return builder.build();
     }
 
     private static List<BetaContentBlockParam> toBlockParams(List<ContentBlock> blocks) {
