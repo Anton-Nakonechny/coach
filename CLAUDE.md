@@ -115,8 +115,9 @@ Green → Refactor: write the failing test first, get sign-off, then implement.
 Most coverage lives in this E2E suite; prefer extending it over unit tests with
 heavy mocking. Exceptions are self-contained logic and boundary classes tested in
 isolation — `attach/MediaTypesTest` (pure function), `config/ApiKeyStartupCheckTest`
-(`ApplicationContextRunner`), and `docs/DocsServiceTest` + `docs/DocFetchGatewayTest`
-(Mockito / in-process `com.sun.net.httpserver.HttpServer`).
+(`ApplicationContextRunner`), and the `docs/` trio — `DocsServiceTest`,
+`DocsCacheTest`, `DocFetchGatewayTest` (Mockito, `@TempDir`, in-process
+`com.sun.net.httpserver.HttpServer`).
 
 ## Pull requests
 

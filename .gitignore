@@ -13,4 +13,5 @@ node_modules/
 playwright-report/
 test-results/
 coaches/Claude/*.pdf
+coaches/Claude/docs/
 .tree/

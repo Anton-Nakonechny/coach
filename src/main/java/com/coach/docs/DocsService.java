@@ -35,10 +35,12 @@ public class DocsService {
             field names, or behaviors the documentation does not state.""";
 
     private final DocFetchGateway gateway;
+    private final DocsCache cache;
     private final int maxChars;
 
-    public DocsService(DocFetchGateway gateway, AppConfig config) {
+    public DocsService(DocFetchGateway gateway, DocsCache cache, AppConfig config) {
         this.gateway = gateway;
+        this.cache = cache;
         this.maxChars = config.docs().maxChars();
     }
 
@@ -93,7 +95,7 @@ public class DocsService {
 
     private Optional<String> fetchQuietly(URI url) {
         try {
-            return Optional.of(gateway.fetch(url));
+            return Optional.of(cache.fetch(url, gateway::fetch));
         } catch (RuntimeException e) {
             log.warn("Skipping unavailable doc {}: {}", url, e.toString());
             return Optional.empty();

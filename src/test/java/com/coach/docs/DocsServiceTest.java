@@ -1,6 +1,7 @@
 package com.coach.docs;
 
 import com.coach.config.AppConfig;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -10,8 +11,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -30,12 +34,24 @@ class DocsServiceTest {
     @Mock
     DocFetchGateway gateway;
 
+    @Mock
+    DocsCache cache;
+
     private static final String GROUNDING_MARK = "official documentation and are your source of truth";
     private static final String DELIM = "=== OFFICIAL DOCUMENTATION (source of truth): ";
 
+    /** Make the cache a transparent pass-through so these tests exercise DocsService only. */
+    @BeforeEach
+    void passThroughCache() {
+        lenient().when(cache.fetch(any(), any())).thenAnswer(inv -> {
+            Function<URI, String> loader = inv.getArgument(1);
+            return loader.apply(inv.getArgument(0));
+        });
+    }
+
     private DocsService docsService(int maxChars) {
         var config = new AppConfig(null, 0, null, null, null, new AppConfig.Docs(null, null, maxChars));
-        return new DocsService(gateway, config);
+        return new DocsService(gateway, cache, config);
     }
 
     @Test
