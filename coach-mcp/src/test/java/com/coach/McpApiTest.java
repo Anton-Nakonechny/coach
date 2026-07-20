@@ -142,6 +142,11 @@ class McpApiTest {
         var headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set(HttpHeaders.ACCEPT, "application/json, text/event-stream");
+        // Fresh connection per POST. The Streamable-HTTP transport closes the socket
+        // after each SSE response; without this, HttpURLConnection's keep-alive pool
+        // hands a just-closed socket to the next POST and reads EOF ("Unexpected end
+        // of file from server") — a race that surfaces on slower CI runners.
+        headers.set(HttpHeaders.CONNECTION, "close");
         if (sessionId != null) headers.set("mcp-session-id", sessionId);
         return rest.postForEntity(url(), new HttpEntity<>(body, headers), String.class);
     }
