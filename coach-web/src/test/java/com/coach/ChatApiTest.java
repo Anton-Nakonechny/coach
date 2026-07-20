@@ -819,6 +819,14 @@ class ChatApiTest {
     }
 
     @Test
+    void unknownRouteReturns404() {
+        ResponseEntity<String> resp = rest.getForEntity(url("/no-such-route"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(json(resp).get("message").asText()).isNotBlank();
+    }
+
+    @Test
     void upstreamErrorPropagatesAs500() {
         doThrow(new RuntimeException("upstream boom")).when(gateway).createMessage(any(), anyInt(), any(), any(), any());
 
