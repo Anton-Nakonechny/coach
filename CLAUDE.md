@@ -48,7 +48,21 @@ history** rebuilt from disk.
   delegates to **`SdkAnthropicGateway`**. Returns only concatenated `text` blocks.
 - **`anthropic/SdkAnthropicGateway`** — sends one Messages request per turn.
   `thinking`/`output_config` go in via `putAdditionalBodyProperty` (raw JSON),
-  the Java analog of Python's `extra_body`. Tests replace it with a `@MockitoBean`.
+  the Java analog of Python's `extra_body`. The system prompt is sent as a
+  `cache_control: ephemeral` block so a conversation's follow-up turns hit the
+  prompt cache. Tests replace it with a `@MockitoBean`; the params factory
+  (`buildParams`) is package-private for the unit test beyond that boundary.
+- **`docs/DocsService` + `docs/DocFetchGateway`** — official-doc grounding for
+  CLAUDE_ARCHITECT. A topic file may start with `<!-- sources: -->` front-matter
+  listing official doc URLs (platform.claude.com / code.claude.com serve pages as
+  markdown; llms.txt is the index). Each turn the front-matter is stripped and the
+  pages are appended to the system prompt as `=== OFFICIAL DOCUMENTATION … ===`
+  sections (plus a source-of-truth grounding preamble), capped at
+  `coach.docs.max-chars`. Pages are snapshotted under `coach.docs.cache-dir`
+  (`coaches/Claude/docs/`, gitignored — Anthropic content, never commit) with
+  `coach.docs.ttl` freshness; resolution order is fresh snapshot → fetch &
+  snapshot → stale snapshot → skip, so the quiz degrades to blueprint-only
+  instead of failing. `DocFetchGateway` is the third `@MockitoBean` boundary.
 - **`store/ConversationStore`** — JSON-Lines persistence: one
   `<conversations-dir>/<id>.jsonl` per conversation. Soft-delete archives one file
   to gzip or all of them to a single timestamped zip under `archive/`. A coach
