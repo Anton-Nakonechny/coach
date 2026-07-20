@@ -1,3 +1,11 @@
+<!-- sources:
+https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview.md
+https://code.claude.com/docs/en/agent-sdk/overview.md
+https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices.md
+https://code.claude.com/docs/en/best-practices.md
+https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons.md
+https://code.claude.com/docs/en/mcp.md
+-->
 # Full exam simulation
 
 Simulate the real "Claude Certified Architect – Foundations" exam: mix questions
