@@ -1,0 +1,20 @@
+server:
+  # Separate port from the web app (9999) so both can run side by side.
+  port: 9998
+
+spring:
+  application:
+    name: coach-mcp
+
+coach:
+  # Root folder of coach scenario prompts, shared with coach-web. Relative to the repo
+  # root: the spring-boot-maven-plugin runs this app from ${maven.multiModuleProjectDirectory}.
+  coaches-dir: coaches
+  # Official-doc grounding for the Claude Architect quiz: topic front-matter URLs are
+  # fetched, snapshotted under cache-dir (gitignored — Anthropic content, never commit),
+  # and appended to the prompt, capped at max-chars. No API key is needed here: the MCP
+  # host makes the LLM call, so the Anthropic-related AppConfig fields go unused.
+  docs:
+    cache-dir: coaches/Claude/docs
+    ttl: 24h
+    max-chars: 150000

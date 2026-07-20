@@ -12,17 +12,33 @@
     </parent>
 
     <groupId>com.coach</groupId>
-    <artifactId>coach</artifactId>
+    <artifactId>coach-parent</artifactId>
     <version>0.1.0</version>
-    <name>coach</name>
-    <description>Thin Claude chat client (Spring Boot / Java 21)</description>
+    <packaging>pom</packaging>
+    <name>coach-parent</name>
+    <description>Thin Claude chat client — shared core, web API app, MCP server app</description>
+
+    <modules>
+        <module>coach-core</module>
+        <module>coach-web</module>
+        <module>coach-mcp</module>
+    </modules>
 
     <properties>
         <java.version>21</java.version>
+        <anthropic.version>2.44.1</anthropic.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!-- Shared library module, so children reference it without a version. -->
+            <dependency>
+                <groupId>com.coach</groupId>
+                <artifactId>coach-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <!-- MCP Java SDK bill of materials. -->
             <dependency>
                 <groupId>io.modelcontextprotocol.sdk</groupId>
                 <artifactId>mcp-bom</artifactId>
@@ -30,51 +46,13 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+
+            <!-- Official Anthropic Java SDK (only coach-web needs it). -->
+            <dependency>
+                <groupId>com.anthropic</groupId>
+                <artifactId>anthropic-java</artifactId>
+                <version>${anthropic.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
-
-    <dependencies>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-validation</artifactId>
-        </dependency>
-
-        <!-- Official Anthropic Java SDK -->
-        <dependency>
-            <groupId>com.anthropic</groupId>
-            <artifactId>anthropic-java</artifactId>
-            <version>2.44.1</version>
-        </dependency>
-
-        <!-- MCP Java SDK: Streamable-HTTP servlet transport lives in mcp-core;
-             mcp-json-jackson2 binds to Spring Boot's Jackson 2 (the `mcp` bundle
-             would drag in Jackson 3). -->
-        <dependency>
-            <groupId>io.modelcontextprotocol.sdk</groupId>
-            <artifactId>mcp-core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.modelcontextprotocol.sdk</groupId>
-            <artifactId>mcp-json-jackson2</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
 </project>

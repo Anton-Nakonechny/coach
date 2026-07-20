@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.coach</groupId>
+        <artifactId>coach-parent</artifactId>
+        <version>0.1.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>coach-core</artifactId>
+    <name>coach-core</name>
+    <description>Shared coach logic: personas, doc grounding, topic/word helpers, config.
+        No Anthropic SDK, no web controllers — reused by both coach-web and coach-mcp.</description>
+
+    <!-- Plain library jar: no spring-boot-maven-plugin repackage, so it can be a dependency. -->
+    <dependencies>
+        <!-- @Component / @ConfigurationProperties binding; brings spring-context + spring-boot,
+             but NOT the servlet stack (that is -web). Doc fetching uses the JDK HttpClient. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+
+        <!-- CoachType / ModelKey carry @JsonValue / @JsonCreator; the plain starter has no
+             Jackson. Annotations only — the full databind is provided by the app modules. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
