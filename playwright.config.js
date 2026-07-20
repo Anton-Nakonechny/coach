@@ -8,7 +8,7 @@ module.exports = defineConfig({
         baseURL: `http://localhost:${port}`,
     },
     webServer: {
-        command: `SERVER_PORT=${port} mvn spring-boot:run -q`,
+        command: `SERVER_PORT=${port} mvn -pl coach-web -am spring-boot:run -q`,
         url: `http://localhost:${port}/api/models`,
         reuseExistingServer: true,
         timeout: 60_000,

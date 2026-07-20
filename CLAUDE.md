@@ -8,19 +8,33 @@ A thin Claude chat client built with Spring Boot 3.5 / Java 21 and the official
 Anthropic Java SDK. Wraps the Anthropic Messages API, persists conversations as
 JSON Lines, and serves a static vanilla-JS UI.
 
+It is a **multi-module Maven build** (parent `coach-parent`): a shared library
+`coach-core` and two independently runnable Spring Boot apps — `coach-web` (REST
+API + UI, port 9999) and `coach-mcp` (MCP server, port 9998) — each depending on
+`coach-core`. Both apps keep the base package `com.coach`, so each one's
+`@SpringBootApplication` component-scan picks up the `com.coach.*` beans from
+`coach-core` on the classpath while never seeing the other app (it isn't a
+dependency). That boundary is what keeps the Anthropic SDK out of `coach-mcp` and
+the MCP stack out of `coach-web`.
+
 ## Commands
 
-Maven (3.8.4) + Java 21. Dependencies resolve against Maven Central.
+Maven (3.8.4) + Java 21. Dependencies resolve against Maven Central. Run these
+from the repo root; the app modules configure `spring-boot:run` to work from the
+root dir so relative `coaches/` / `conversations/` / `.env.key` resolve.
 
 ```bash
-mvn test           # run the JUnit 5 suite
-mvn spring-boot:run # run the app (port set in src/main/resources/application.yml)
-./run.sh            # same; Spring loads the key from .env.key
-mvn test -Dtest=ChatApiTest#chatMintsConversationAndReturnsAnswer  # single test
+mvn test                           # run the whole reactor's JUnit 5 suites
+./run.sh                           # coach-web (9999); Spring loads the key from .env.key
+mvn -pl coach-web -am spring-boot:run   # same as run.sh
+./run-mcp.sh                       # coach-mcp (9998); no API key needed
+mvn -pl coach-mcp -am spring-boot:run   # same as run-mcp.sh
+mvn -pl coach-web test -Dtest=ChatApiTest#chatMintsConversationAndReturnsAnswer  # single test
 ```
 
-The app reads `ANTHROPIC_API_KEY` from the environment; the test suite does not
-(the SDK gateway is faked).
+`coach-web` reads `ANTHROPIC_API_KEY` from the environment; `coach-mcp` never
+makes an LLM call so needs no key; the test suites don't need one (the SDK gateway
+is faked).
 
 ## Security
 
@@ -34,10 +48,28 @@ environment variables and system properties still take precedence over the file.
 
 ## Architecture
 
-Request flow: `static/script.js` → `POST /api/chat` → `ChatController` persists the
-user turn, calls `ClaudeClient.generate()`, persists the assistant turn, returns
-the answer. The Anthropic API is stateless, so **every turn resends the full
-history** rebuilt from disk.
+### Modules
+
+- **`coach-core`** — shared library (plain jar, no `spring-boot-maven-plugin`
+  repackage, no Anthropic SDK, no web controllers). Holds `coach/` (incl.
+  `InvalidRequestException`), `docs/`, `model/`, `word/`, `config/AppConfig`, and
+  the shared parsed-content records in `dto/` (`SentenceItem`, `TopicSection`,
+  `QuizQuestion`, `QuizOption`). Needs `jackson-annotations` for the `@JsonValue`
+  enums (`CoachType`, `ModelKey`); full Jackson comes from the app modules.
+- **`coach-web`** — REST API + static UI (port 9999). `anthropic/`, `attach/`,
+  `store/`, `web/` (controllers + request/response DTOs), `config/`
+  (`AnthropicClientConfig`, `ApiKeyStartupCheck`), main `CoachWebApplication`.
+- **`coach-mcp`** — MCP server (port 9998). Just `mcp/` + main
+  `CoachMcpApplication`; reuses `coach-core` and never touches the Anthropic
+  gateways or persistence.
+
+Paths below name packages under `com.coach.*`; find them in the module that owns
+the package per the list above.
+
+Request flow (`coach-web`): `static/script.js` → `POST /api/chat` →
+`ChatController` persists the user turn, calls `ClaudeClient.generate()`, persists
+the assistant turn, returns the answer. The Anthropic API is stateless, so **every
+turn resends the full history** rebuilt from disk.
 
 - **`model/ModelsConfig`** — source of truth. The ordered `MODELS` list drives both
   the `/api/models` UI payload and per-model request shaping; `supportsEffort` /
@@ -63,22 +95,26 @@ history** rebuilt from disk.
   `coach.docs.ttl` freshness; resolution order is fresh snapshot → fetch &
   snapshot → stale snapshot → skip, so the quiz degrades to blueprint-only
   instead of failing. `DocFetchGateway` is the third `@MockitoBean` boundary.
-- **`mcp/McpServerConfig` + `mcp/ClaudeQuizPrompt`** — MCP server (Streamable HTTP,
-  MCP Java SDK `mcp-core` + `mcp-json-jackson2`) at `POST /mcp`: a plain servlet
-  registered at the exact mapping, so REST routes are untouched. Exposes one MCP
-  prompt, `claude-architect-quiz(topic)` (topic argument completable from
+- **`mcp/McpServerConfig` + `mcp/ClaudeQuizPrompt`** (the whole `coach-mcp` app) —
+  a standalone MCP server (Streamable HTTP, MCP Java SDK `mcp-core` +
+  `mcp-json-jackson2`) at `POST /mcp` on **port 9998**, its own
+  `CoachMcpApplication` + minimal `application.yml`. The transport is a plain
+  servlet registered at the exact mapping. Exposes one MCP prompt,
+  `claude-architect-quiz(topic)` (topic argument completable from
   `claudeTopics()`); `prompts/get` returns the same `CLAUDE_PERSONA` + topic file +
-  official-docs text `systemPrompt()` builds for the web chat, as a single
-  user-role message — the MCP host (e.g. Claude Code after
-  `claude mcp add --transport http coach http://localhost:9999/mcp`) owns the
-  conversation and the LLM call; this path never touches the Anthropic gateways or
-  persistence. Prompts only by design: no MCP tools, and no MCP resources so the
-  gitignored exam PDF and doc snapshots stay unreachable. The topic value is
+  official-docs text `CoachService.systemPrompt()` builds for the web chat, as a
+  single user-role message — the MCP host (e.g. Claude Code after
+  `claude mcp add --transport http coach http://localhost:9998/mcp`) owns the
+  conversation and the LLM call. This app depends only on `coach-core`: the
+  Anthropic SDK and persistence aren't on its classpath at all, and `coach-web` no
+  longer serves `/mcp`. Prompts only by design: no MCP tools, and no MCP resources
+  so the gitignored exam PDF and doc snapshots stay unreachable. The topic value is
   quote-stripped and resolved by unique case-insensitive fragment (Claude Code
   splits slash-command args on whitespace and passes only the first token);
-  unknown/missing/ambiguous topic → JSON-RPC `-32602`. `McpApiTest` covers it
-  black-box (initialize handshake mints
-  an `mcp-session-id` header; later JSON-RPC responses arrive as SSE `data:` lines).
+  unknown/missing/ambiguous topic → JSON-RPC `-32602`. `McpApiTest` (in `coach-mcp`)
+  covers it black-box (initialize handshake mints an `mcp-session-id` header; later
+  JSON-RPC responses arrive as SSE `data:` lines); it fakes only the `DocFetchGateway`
+  boundary — there are no Anthropic gateways in this module to mock.
 - **`store/ConversationStore`** — JSON-Lines persistence: one
   `<conversations-dir>/<id>.jsonl` per conversation. Soft-delete archives one file
   to gzip or all of them to a single timestamped zip under `archive/`. A coach
@@ -136,7 +172,7 @@ history** rebuilt from disk.
 
 ## Testing approach (TDD)
 
-`src/test/java/com/coach/ChatApiTest.java` is a black-box E2E suite
+`coach-web/src/test/java/com/coach/ChatApiTest.java` is a black-box E2E suite
 (`@SpringBootTest(RANDOM_PORT)` + `TestRestTemplate`) running the whole owned stack
 for real, with JSONL persistence redirected to a JUnit temp dir. Only the two
 Anthropic boundaries are faked via `@MockitoBean` (`SdkAnthropicGateway` and
@@ -144,10 +180,12 @@ Anthropic boundaries are faked via `@MockitoBean` (`SdkAnthropicGateway` and
 Green → Refactor: write the failing test first, get sign-off, then implement.
 Most coverage lives in this E2E suite; prefer extending it over unit tests with
 heavy mocking. Exceptions are self-contained logic and boundary classes tested in
-isolation — `attach/MediaTypesTest` (pure function), `config/ApiKeyStartupCheckTest`
-(`ApplicationContextRunner`), and the `docs/` trio — `DocsServiceTest`,
-`DocsCacheTest`, `DocFetchGatewayTest` (Mockito, `@TempDir`, in-process
-`com.sun.net.httpserver.HttpServer`).
+isolation — `coach-web` `attach/MediaTypesTest` (pure function),
+`config/ApiKeyStartupCheckTest` (`ApplicationContextRunner`), and the `coach-core`
+`docs/` trio — `DocsServiceTest`, `DocsCacheTest`, `DocFetchGatewayTest` (Mockito,
+`@TempDir`, in-process `com.sun.net.httpserver.HttpServer`). `coach-mcp`'s
+`McpApiTest` is the MCP-app E2E suite. `mvn test` at the root runs every module's
+suite; scope to one with `-pl coach-web` / `-pl coach-mcp` / `-pl coach-core`.
 
 ## Pull requests
 
