@@ -11,6 +11,7 @@ import com.coach.anthropic.SdkAnthropicGateway;
 import com.coach.anthropic.SdkFileUploadGateway;
 import com.coach.anthropic.TextBlock;
 import com.coach.anthropic.UploadedFile;
+import com.coach.docs.DocFetchGateway;
 import com.coach.store.ConversationStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -57,12 +58,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * Black-box end-to-end tests of the Coach HTTP contract — Java port of
  * {@code backend/tests/test_api.py}. The whole owned stack runs for real
  * (controller, request shaping, JSONL persistence in a tmp dir); only the
- * Anthropic boundary is faked via a Mockito {@code @MockitoBean}.
+ * Anthropic and docs-fetch boundaries are faked via Mockito {@code @MockitoBean}s.
  *
  * <p>Status codes follow idiomatic Spring conventions: bad input → 400 (Bean
  * Validation), unknown model → 400, not found → 404, upstream failure → 500.
@@ -93,6 +95,10 @@ class ChatApiTest {
         registry.add("coach.upload.max-files-per-message", () -> 5);
         registry.add("coach.upload.max-zip-entries", () -> 10);
         registry.add("coach.upload.max-total-extracted-bytes", () -> 8192);
+        // Docs snapshots live under the temp coaches dir; a small cap so truncation
+        // can be exercised with modest inputs.
+        registry.add("coach.docs.cache-dir", () -> COACHES_DIR.resolve("Claude").resolve("docs").toString());
+        registry.add("coach.docs.max-chars", () -> 10000);
     }
 
     @LocalServerPort
@@ -106,6 +112,9 @@ class ChatApiTest {
 
     @MockitoBean
     SdkFileUploadGateway fileUploadGateway;
+
+    @MockitoBean
+    DocFetchGateway docFetchGateway;
 
     @Autowired
     ConversationStore store;
@@ -1197,6 +1206,102 @@ class ChatApiTest {
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
         assertThat(CONV_DIR.toFile().list()).isEmpty();
         assertThat(gatewayCalls).isEmpty();
+    }
+
+    // ── Ground Claude Architect questions in official docs (front-matter sources) ── //
+
+    private static final String DOC_URL_TOOLS =
+            "https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview.md";
+    private static final String DOC_URL_STOP =
+            "https://platform.claude.com/docs/en/api/handling-stop-reasons.md";
+
+    /** A topic blueprint declaring two official-doc sources in its front-matter. */
+    private static final String SOURCED_BLUEPRINT = """
+            <!-- sources:
+            %s
+            %s
+            -->
+            STOP_REASON DRILL""".formatted(DOC_URL_TOOLS, DOC_URL_STOP);
+
+    /** Script the docs fetch to return a distinct body per URL. */
+    private void scriptDocFetch() {
+        doAnswer(inv -> inv.getArgument(0).toString().contains("stop-reasons")
+                ? "STOP REASONS DOC BODY" : "TOOL USE DOC BODY")
+                .when(docFetchGateway).fetch(any());
+    }
+
+    private String lastSystem() {
+        return gatewayCalls.get(gatewayCalls.size() - 1).system();
+    }
+
+    @Test
+    void claudeChatStuffsOfficialDocsIntoSystemPrompt() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", SOURCED_BLUEPRINT);
+        scriptDocFetch();
+
+        var resp = postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(lastSystem()).containsSubsequence(
+                "Claude Certified Architect",
+                "STOP_REASON DRILL",
+                "=== OFFICIAL DOCUMENTATION (source of truth): " + DOC_URL_TOOLS + " ===",
+                "TOOL USE DOC BODY",
+                "=== OFFICIAL DOCUMENTATION (source of truth): " + DOC_URL_STOP + " ===",
+                "STOP REASONS DOC BODY");
+        assertThat(lastSystem()).doesNotContain("<!-- sources:");
+    }
+
+    @Test
+    void claudeChatWithoutSourcesLeavesSystemPromptAsBefore() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "STOP_REASON DRILL");
+
+        postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(lastSystem()).endsWith("STOP_REASON DRILL");
+        assertThat(lastSystem()).doesNotContain("OFFICIAL DOCUMENTATION");
+        verifyNoInteractions(docFetchGateway);
+    }
+
+    @Test
+    void claudeChatSurvivesDocFetchFailure() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", SOURCED_BLUEPRINT);
+        doThrow(new RuntimeException("docs down")).when(docFetchGateway).fetch(any());
+
+        var resp = postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(lastSystem()).contains("STOP_REASON DRILL");
+        assertThat(lastSystem()).doesNotContain("OFFICIAL DOCUMENTATION");
+        assertThat(lastSystem()).doesNotContain("<!-- sources:");
+    }
+
+    @Test
+    void claudeFollowUpResendsSameDocs() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", SOURCED_BLUEPRINT);
+        scriptDocFetch();
+
+        var cid = json(postChat(claudeBody("1.1 Agentic loops"))).get("conversationId").asText();
+        postChat(chatBody("Next question.", "sonnet-4-6", null, cid));
+
+        var first = gatewayCalls.get(gatewayCalls.size() - 2).system();
+        assertThat(first).contains("TOOL USE DOC BODY");
+        assertThat(lastSystem()).isEqualTo(first);
+    }
+
+    @Test
+    void claudeChatTruncatesOversizedDocs() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", """
+                <!-- sources:
+                %s
+                -->
+                STOP_REASON DRILL""".formatted(DOC_URL_TOOLS));
+        doAnswer(inv -> "X".repeat(50_000)).when(docFetchGateway).fetch(any());
+
+        postChat(claudeBody("1.1 Agentic loops"));
+
+        assertThat(lastSystem()).contains("[truncated]");
+        assertThat(lastSystem().length()).isLessThan(20_000);
     }
 
     @Test

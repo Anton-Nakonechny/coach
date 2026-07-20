@@ -39,6 +39,13 @@ coach:
   conversations-dir: conversations
   # Root folder of coach scenario prompts (one subfolder per coach). Overridden in tests.
   coaches-dir: coaches
+  # Official-doc grounding for the Claude Architect coach: topic front-matter URLs are
+  # fetched, snapshotted under cache-dir (gitignored — Anthropic content, never commit),
+  # and appended to the system prompt, capped at max-chars.
+  docs:
+    cache-dir: coaches/Claude/docs
+    ttl: 24h
+    max-chars: 150000
   # File-attachment limits (see AppConfig.Upload). Attachments are uploaded to the
   # Anthropic Files API; zips are expanded server-side into individual attachments.
   upload:
