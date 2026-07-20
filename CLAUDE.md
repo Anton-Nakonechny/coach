@@ -106,8 +106,9 @@ turn resends the full history** rebuilt from disk.
   servlet registered at the exact mapping. Exposes one MCP prompt,
   `claude-architect-quiz(topic)` (topic argument completable from
   `claudeTopics()`); `prompts/get` returns the same `CLAUDE_PERSONA` + topic file +
-  official-docs text `CoachService.systemPrompt()` builds for the web chat, as a
-  single user-role message — the MCP host (e.g. Claude Code after
+  official-docs text `CoachService.systemPrompt()` builds for the web chat,
+  followed by the same random-bullet opening instruction, as a single user-role
+  message — the MCP host (e.g. Claude Code after
   `claude mcp add --transport http coach http://localhost:9998/mcp`) owns the
   conversation and the LLM call. This app depends only on `coach-core`: the
   Anthropic SDK and persistence aren't on its classpath at all, and `coach-web` no
@@ -135,6 +136,10 @@ turn resends the full history** rebuilt from disk.
   `coaches/Claude/`; clicking a topic POSTs with `coachType=claude-architect` and
   `topic=<stem>` (blank message), storing `CoachMeta(CLAUDE_ARCHITECT, stem+".md",
   null)`; every turn resends `CLAUDE_PERSONA + topic file` as the system prompt.
+  The opening user turn is `claudeOpeningInstruction()`: the plain "Ask me the
+  first exam question." plus one randomly chosen `- ` bullet from the topic file
+  (plain instruction when the file has no bullets), so first questions spread
+  across the blueprint instead of converging on the model's modal pick.
   `QuestionParser.parse()` (D4: ≥5 non-blank lines, last 4 are A–D options in order,
   no other option lines, ≥1 stem line) populates the `question` field of
   `ChatResponse` and `MessageItem` (derived at read time, never persisted). The PDF
