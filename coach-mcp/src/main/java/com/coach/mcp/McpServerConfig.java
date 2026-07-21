@@ -41,11 +41,12 @@ public class McpServerConfig {
 
     /** Eager bean: wires the prompt handlers into the transport before it serves traffic. */
     @Bean(destroyMethod = "closeGracefully")
-    McpSyncServer mcpServer(HttpServletStreamableServerTransportProvider transport, ClaudeQuizPrompt quiz) {
+    McpSyncServer mcpServer(HttpServletStreamableServerTransportProvider transport,
+                            ClaudeQuizPrompt quiz, CoachTopicsPrompt topics) {
         return McpServer.sync(transport)
                 .serverInfo("coach", "0.1.0")
                 .capabilities(McpSchema.ServerCapabilities.builder().prompts(false).completions().build())
-                .prompts(quiz.promptSpecification())
+                .prompts(quiz.promptSpecification(), topics.promptSpecification())
                 .completions(quiz.completionSpecification())
                 .build();
     }
