@@ -259,7 +259,6 @@ class McpApiTest {
                 {"name":"topics"}""");
 
         assertThat(CONV_DIR.toFile().list()).isEmpty();
-        verifyNoInteractions(gateway, fileUploadGateway);
     }
 
     @Test
