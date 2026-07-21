@@ -145,7 +145,8 @@ turn resends the full history** rebuilt from disk.
   (plain instruction when the file has no bullets), so first questions spread
   across the blueprint instead of converging on the model's modal pick.
   `QuestionParser.parse()` (D4: ≥5 non-blank lines, last 4 are A–D options in order,
-  no other option lines, ≥1 stem line) populates the `question` field of
+  no other option lines, ≥1 stem line, at least one stem line containing `?` so an A–D
+  feedback recap isn't misread as a new question) populates the `question` field of
   `ChatResponse` and `MessageItem` (derived at read time, never persisted). The PDF
   exam guide is gitignored (`coaches/Claude/*.pdf`) and must never be committed.
   **字 word mode (ephemeral):** `word/WordSetStore` stores translated pairs in a
@@ -169,8 +170,9 @@ turn resends the full history** rebuilt from disk.
   `/api/chat {coachType:'spanish', message:words}` with no topic, seeding a persisted
   語 conversation with `OPENING_WITH_WORDS_NO_TOPIC`; "De nuevo 字" restarts a 字 quiz
   over all words.
-- **`web/ChatController`** + `ApiExceptionHandler` — the nine route handlers (`/api/chat`
-  has JSON + multipart overloads, plus the two 字 word routes); the handler maps
+- **`web/ChatController`** + `ApiExceptionHandler` — the REST route handlers (`/api/chat`
+  has JSON + multipart overloads; the two 字 word routes live on `SpanishWordController`);
+  the handler maps
   errors to `{"message": ...}` (FastAPI used `{"detail": ...}`) with idiomatic Spring
   codes (400 / 404 / 500 — Bean Validation failures return 400, where FastAPI returned 422).
 - **`config/AppConfig`** — `@ConfigurationProperties(coach.*)`: api key, `maxTokens`
