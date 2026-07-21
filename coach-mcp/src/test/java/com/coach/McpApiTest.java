@@ -210,13 +210,69 @@ class McpApiTest {
         var message = mcpCall(sessionId, 2, "prompts/list", "{}");
 
         var prompts = message.path("result").path("prompts");
-        assertThat(prompts).hasSize(1);
-        var prompt = prompts.get(0);
-        assertThat(prompt.path("name").asText()).isEqualTo("claude-architect-quiz");
+        JsonNode prompt = null;
+        for (var p : prompts)
+            if ("claude-architect-quiz".equals(p.path("name").asText())) prompt = p;
+        assertThat(prompt).isNotNull();
         var arguments = prompt.path("arguments");
         assertThat(arguments).hasSize(1);
         assertThat(arguments.get(0).path("name").asText()).isEqualTo("topic");
         assertThat(arguments.get(0).path("required").asBoolean()).isTrue();
+    }
+
+    @Test
+    void promptsList_afterInitialize_advertisesTopicsPromptWithNoArgs() {
+        var sessionId = initializeSession();
+
+        var message = mcpCall(sessionId, 2, "prompts/list", "{}");
+
+        var prompts = message.path("result").path("prompts");
+        JsonNode topicsPrompt = null;
+        for (var p : prompts)
+            if ("topics".equals(p.path("name").asText())) topicsPrompt = p;
+        assertThat(topicsPrompt).isNotNull();
+        assertThat(topicsPrompt.path("arguments").isEmpty()).isTrue();
+    }
+
+    @Test
+    void promptsGet_topicsPrompt_returnsSortedTopicList() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        writeClaudePrompt("2.4 MCP server integration.md", "content");
+        var sessionId = initializeSession();
+
+        var message = mcpCall(sessionId, 2, "prompts/get", """
+                {"name":"topics"}""");
+
+        var text = message.path("result").path("messages").get(0).path("content").path("text").asText();
+        assertThat(text).contains("1.1 Agentic loops");
+        assertThat(text).contains("2.4 MCP server integration");
+        assertThat(text).doesNotContain(".md");
+        assertThat(text.indexOf("1.1 Agentic loops")).isLessThan(text.indexOf("2.4 MCP server integration"));
+    }
+
+    @Test
+    void promptsGet_topicsPrompt_writesNoConversationFiles() throws IOException {
+        writeClaudePrompt("1.1 Agentic loops.md", "content");
+        var sessionId = initializeSession();
+
+        mcpCall(sessionId, 2, "prompts/get", """
+                {"name":"topics"}""");
+
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+        verifyNoInteractions(gateway, fileUploadGateway);
+    }
+
+    @Test
+    void promptsGet_topicsPrompt_emptyCoachesDir_returnsCleanInternalError() {
+        var sessionId = initializeSession();
+
+        var message = mcpCall(sessionId, 2, "prompts/get", """
+                {"name":"topics"}""");
+
+        assertThat(message.has("result")).isFalse();
+        assertThat(message.path("error").path("code").asInt()).isEqualTo(-32603);
+        assertThat(message.path("error").path("message").asText())
+                .doesNotContain(COACHES_DIR.toString());
     }
 
     @Test
