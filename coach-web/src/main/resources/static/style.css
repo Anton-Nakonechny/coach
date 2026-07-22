@@ -798,6 +798,7 @@ header { display: none; }
     display: inline-block;
     vertical-align: -2px;
     flex-shrink: 0;
+    margin-right: 6px;
     color: var(--claude-accent);
 }
 
