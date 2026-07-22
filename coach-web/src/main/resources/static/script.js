@@ -1117,6 +1117,18 @@ function startNewChat() {
     chatInput.focus();
 }
 
+// Small sunburst mark standing in for the "Claude" word in claude-architect history rows.
+function claudeLogoIcon() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'claude-logo-icon');
+    svg.setAttribute('width', '14');
+    svg.setAttribute('height', '14');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = '<path fill="currentColor" d="M12 1.5 L14.2 9.3 22 12 14.2 14.7 12 22.5 9.8 14.7 2 12 9.8 9.3 Z"/>';
+    return svg;
+}
+
 async function loadConversations() {
     try {
         const response = await fetch(`${API_URL}/conversations`);
@@ -1136,10 +1148,15 @@ async function loadConversations() {
 
             const btn = document.createElement('button');
             btn.className = 'conversation-item';
-            if (item.coachType === 'claude-architect') btn.classList.add('claude-chat');
-            else if (item.coachType === 'spanish') btn.classList.add('spanish-chat');
-            else if (item.coachType) btn.classList.add('coach-chat');
-            btn.textContent = item.preview;
+            if (item.coachType === 'claude-architect') {
+                btn.classList.add('claude-chat');
+                btn.appendChild(claudeLogoIcon());
+                btn.appendChild(document.createTextNode(item.preview.replace(/^Claude/, '')));
+            } else {
+                if (item.coachType === 'spanish') btn.classList.add('spanish-chat');
+                else if (item.coachType) btn.classList.add('coach-chat');
+                btn.textContent = item.preview;
+            }
             btn.dataset.id = item.conversationId;
             btn.addEventListener('click', () => {
                 openConversation(item.conversationId);
