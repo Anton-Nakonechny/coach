@@ -364,6 +364,20 @@ header { display: none; }
 .message-content strong { font-weight: 600; }
 .message-content em { font-style: italic; }
 .message-content hr { border: none; border-top: 1px solid var(--border-color); margin: 1rem 0; }
+.message-content p > a:only-child {
+    display: inline-block;
+    background: #162040;
+    border: 1px solid #2d4fd6;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+    color: #7b96f5;
+    line-height: 1.4;
+    text-decoration: none;
+    transition: border-color 0.2s ease;
+    margin-top: 0.25rem;
+}
+.message-content p > a:only-child:hover { border-color: var(--primary-color); }
 
 /* Chat Input */
 .chat-input-container {
