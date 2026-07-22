@@ -29,6 +29,28 @@ marked.use({ renderer: { link(token) {
     return html.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
 } } });
 
+const BILLING_URL = 'https://console.anthropic.com/settings/billing';
+const BILLING_TRIGGER = /credit balance|plans?\s*&\s*billing/i;
+
+// Anthropic SDK exceptions arrive as "400: {<json>}" — extract the inner message.
+function humanizeError(raw) {
+    const m = /^\d{3}:\s*(\{[\s\S]+)$/.exec(raw);
+    if (m) {
+        try { return JSON.parse(m[1])?.error?.message || raw; } catch {}
+    }
+    return raw;
+}
+
+function withBillingLink(message) {
+    if (BILLING_TRIGGER.test(message))
+        return `${message}\n\n[Add credits at Anthropic Billing →](${BILLING_URL})`;
+    return message;
+}
+
+function addError(message) {
+    addMessage(withBillingLink(`Error: ${humanizeError(message)}`), 'assistant');
+}
+
 // DOM elements
 let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
     conversationList, clearAllButton, attachButton, fileInput, attachmentStrip,
@@ -237,7 +259,7 @@ async function startCoachChat(body, errorLabel) {
         await openConversation(data.conversationId);
     } catch (error) {
         startNewChat();
-        coachNote.textContent = error.message;
+        addError(error.message);
     } finally {
         setCoachRadiosDisabled(false);
     }
@@ -286,8 +308,8 @@ async function enterTopicSetup({ welcome, setupName, endpoint, gridId, cached, o
             if (!resp.ok) throw new Error(data.message || 'Failed to load topics');
             topics = data;
         } catch (e) {
-            coachNote.textContent = e.message;
             startNewChat();
+            addError(e.message);
             return null;
         }
     }
@@ -689,7 +711,7 @@ async function sendMessage() {
         // so the user can still pick an answer without losing the question.
         chatMessages.querySelectorAll('.quiz-option:disabled')
             .forEach(btn => { btn.disabled = false; });
-        addMessage(`Error: ${error.message}`, 'assistant');
+        addError(error.message);
         activateQuiz();
         attachmentsSnapshot.forEach(a => { if (a.objectUrl) URL.revokeObjectURL(a.objectUrl); });
     } finally {
@@ -729,7 +751,7 @@ async function translateWords(words) {
         buildWordCheck(data.setId, data.items);
     } catch (err) {
         loadingMessage.remove();
-        addMessage(`Error: ${err.message}`, 'assistant');
+        addError(err.message);
     } finally {
         chatInput.disabled = false;
         sendButton.disabled = false;
@@ -860,7 +882,7 @@ async function checkWords(setId, rows, checkBtn) {
         const container = rows[0].closest('.word-check');
         if (container) container.appendChild(actions);
     } catch (err) {
-        addMessage(`Error: ${err.message}`, 'assistant');
+        addError(err.message);
         rows.forEach(r => { r.querySelector('.word-answer').disabled = false; });
     }
 }
@@ -912,7 +934,7 @@ async function practiceMissed(words) {
         setSpanishMode('language');  // switch toggle back to 語
     } catch (err) {
         loadingMessage.remove();
-        addMessage(`Error: ${err.message}`, 'assistant');
+        addError(err.message);
     } finally {
         chatInput.disabled = false;
         sendButton.disabled = false;
