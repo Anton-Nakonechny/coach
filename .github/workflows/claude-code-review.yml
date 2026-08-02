@@ -45,8 +45,12 @@ jobs:
           # CI auto-denies any tool not allowlisted; the plugin leads with `gh pr diff`
           # and posts via the inline-comment MCP tool, so grant its declared tool set
           # (plus read-only git history). File reads come from .claude/settings.json.
+          # The SDK runner exits the moment the top-level agent ends its turn, so
+          # review subagents must run in the foreground — background agents never
+          # get to report back and the run ends with zero findings.
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+            --allowedTools "Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git fetch:*)"
+            --append-system-prompt "You run non-interactively in CI: the session terminates as soon as you end your turn, and background agents can never report back. Never launch agents with run_in_background: true — run every subagent in the foreground and wait for its result before continuing."
           # Temporary while tuning this job: surfaces the agent transcript in the run
           # log so denied tools / skipped findings are visible. Remove once stable.
           show_full_output: true
