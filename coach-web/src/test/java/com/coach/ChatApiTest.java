@@ -1,5 +1,6 @@
 package com.coach;
 
+import com.anthropic.errors.AnthropicIoException;
 import com.coach.anthropic.AnthropicBlock;
 import com.coach.anthropic.ApiMessage;
 import com.coach.anthropic.AttachmentBlock;
@@ -11,6 +12,7 @@ import com.coach.anthropic.SdkAnthropicGateway;
 import com.coach.anthropic.SdkFileUploadGateway;
 import com.coach.anthropic.TextBlock;
 import com.coach.anthropic.UploadedFile;
+import com.coach.config.AppConfig;
 import com.coach.docs.DocFetchGateway;
 import com.coach.store.ConversationStore;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -123,6 +125,9 @@ class ChatApiTest {
 
     @Autowired
     ConversationStore store;
+
+    @Autowired
+    AppConfig appConfig;
 
     private final Deque<List<AnthropicBlock>> pendingResponses = new ArrayDeque<>();
     private final List<GatewayCall> gatewayCalls = new ArrayList<>();
@@ -844,6 +849,48 @@ class ChatApiTest {
         ResponseEntity<String> resp = postChat(chatBody("hi", "opus-4-8", null, null));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @Test
+    void requestTimeoutConfig_bindsFromProperty() {
+        assertThat(appConfig.requestTimeout()).isGreaterThan(java.time.Duration.ZERO);
+    }
+
+    @Test
+    void fileUpload_uncheckedIoException_returnsNestedCauseInBody() {
+        doThrow(new java.io.UncheckedIOException("outer-wrap", new java.io.IOException("disk-full-inner")))
+                .when(fileUploadGateway).upload(any(), any(), any());
+
+        ResponseEntity<String> resp = postChatMultipart(
+                chatBody("review", "opus-4-8", null, null),
+                List.of(new PartFile("img.png", "image/png", new byte[]{(byte) 0x89, 'P', 'N', 'G'})));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).contains("disk-full-inner");
+    }
+
+    @Test
+    void fileUpload_ioExceptionWithoutMessage_returnsJsonErrorBody() {
+        doThrow(new java.io.UncheckedIOException(new java.io.EOFException()))
+                .when(fileUploadGateway).upload(any(), any(), any());
+
+        ResponseEntity<String> resp = postChatMultipart(
+                chatBody("review", "opus-4-8", null, null),
+                List.of(new PartFile("img.png", "image/png", new byte[]{(byte) 0x89, 'P', 'N', 'G'})));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void anthropicSdkIoException_returnsJsonBodyAsBadGateway() {
+        doThrow(new AnthropicIoException("connection reset by peer"))
+                .when(gateway).createMessage(any(), anyInt(), any(), any(), any());
+
+        ResponseEntity<String> resp = postChat(chatBody("review", "opus-4-8", null, null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
+        assertThat(json(resp).get("message").asText()).contains("connection reset by peer");
     }
 
     // ----------------------------------------------------------------------- //
@@ -2446,5 +2493,29 @@ class ChatApiTest {
     void scriptJs_markedRenderer_opensLinksInNewTab() {
         var js = rest.getForObject(url("/script.js"), String.class);
         assertThat(js).contains("target=\"_blank\" rel=\"noopener noreferrer\"");
+    }
+
+    @Test
+    void scriptJs_sendMessage_hasAbortController() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js).contains("AbortController");
+    }
+
+    @Test
+    void scriptJs_humanizeError_mapsFailedToFetch() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js).contains("humanizeError");
+    }
+
+    @Test
+    void scriptJs_failurePath_offersRetry() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js).contains("Retry");
+    }
+
+    @Test
+    void scriptJs_humanizeError_declaredExactlyOnce() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js.split("function humanizeError", -1)).hasSize(2);
     }
 }

@@ -12,6 +12,7 @@ import java.util.List;
  * @param maxTokens        non-streaming output cap (kept under SDK HTTP timeouts).
  * @param conversationsDir directory holding per-conversation JSONL files.
  * @param coachesDir       root folder of coach scenario prompts (one subfolder per coach).
+ * @param requestTimeout   maximum time for a complete Anthropic API call; generous for image reviews.
  * @param upload           file-attachment limits.
  * @param docs             official-documentation grounding settings.
  */
@@ -21,6 +22,7 @@ public record AppConfig(
         int maxTokens,
         String conversationsDir,
         String coachesDir,
+        Duration requestTimeout,
         Upload upload,
         Docs docs
 ) {

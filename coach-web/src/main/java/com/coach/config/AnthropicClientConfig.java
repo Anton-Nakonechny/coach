@@ -12,6 +12,7 @@ public class AnthropicClientConfig {
     public AnthropicClient anthropicClient(AppConfig config) {
         return AnthropicOkHttpClient.builder()
                 .apiKey(config.anthropicApiKey())
+                .timeout(config.requestTimeout())
                 .build();
     }
 }

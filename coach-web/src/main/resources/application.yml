@@ -35,6 +35,9 @@ coach:
   anthropic-api-key: ${ANTHROPIC_API_KEY:}
   # Cap non-streaming output to stay well under SDK HTTP timeouts.
   max-tokens: 16000
+  # Generous timeout for long image-review generations (non-streaming, up to 16k output tokens).
+  # The client AbortController should be set slightly longer than this value.
+  request-timeout: 5m
   # Where per-conversation JSONL files live. Overridden to a tmp dir in tests.
   conversations-dir: conversations
   # Root folder of coach scenario prompts (one subfolder per coach). Overridden in tests.

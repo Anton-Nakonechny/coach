@@ -30,7 +30,7 @@ class DocsCacheTest {
     private static final URI URL = URI.create("https://platform.claude.com/docs/en/api/overview.md");
 
     private DocsCache cache(Path dir, Duration ttl) {
-        var config = new AppConfig(null, 0, null, null, null, new AppConfig.Docs(dir.toString(), ttl, 0));
+        var config = new AppConfig(null, 0, null, null, null, null, new AppConfig.Docs(dir.toString(), ttl, 0));
         return new DocsCache(config);
     }
 
