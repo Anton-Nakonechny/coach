@@ -406,7 +406,7 @@ const MAX_FILE_COUNT = 20;
 const uid = () =>
     (crypto.randomUUID?.() ?? `att-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
-function addFiles(fileList) {
+async function addFiles(fileList) {
     let firstError = null;
     for (const file of Array.from(fileList)) {
         if (pendingAttachments.length >= MAX_FILE_COUNT) {
@@ -424,14 +424,26 @@ function addFiles(fileList) {
         // dedupe by name + size
         if (pendingAttachments.some(a => a.file.name === file.name && a.file.size === file.size)) continue;
 
-        const kind = (file.type === 'application/zip' || /\.zip$/i.test(file.name)) ? 'ZIP'
-                   : file.type.startsWith('image/') ? 'IMAGE'
+        // Copy the bytes into memory now. A File from the picker or drag-drop only
+        // references the disk file, and Chrome aborts the whole request with
+        // ERR_UPLOAD_FILE_CHANGED if that file is touched before fetch reads it
+        // (macOS keeps rewriting fresh screenshots, cloud sync touches files too).
+        let copy;
+        try {
+            copy = new File([await file.arrayBuffer()], file.name, { type: file.type });
+        } catch {
+            firstError = firstError || `Couldn't read "${file.name}" — try attaching it again`;
+            continue;
+        }
+
+        const kind = (copy.type === 'application/zip' || /\.zip$/i.test(copy.name)) ? 'ZIP'
+                   : copy.type.startsWith('image/') ? 'IMAGE'
                    : 'DOCUMENT';
         pendingAttachments.push({
             id: uid(),
-            file,
+            file: copy,
             kind,
-            objectUrl: kind === 'IMAGE' ? URL.createObjectURL(file) : null,
+            objectUrl: kind === 'IMAGE' ? URL.createObjectURL(copy) : null,
         });
     }
     composerError.textContent = firstError || '';
