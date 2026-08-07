@@ -32,8 +32,13 @@ marked.use({ renderer: { link(token) {
 const BILLING_URL = 'https://console.anthropic.com/settings/billing';
 const BILLING_TRIGGER = /credit balance|plans?\s*&\s*billing/i;
 
-// Anthropic SDK exceptions arrive as "400: {<json>}" — extract the inner message.
-function humanizeError(raw) {
+function humanizeError(error) {
+    if (error.name === 'AbortError')
+        return "The request timed out — the server may still be processing. Please try again.";
+    const raw = error.message || String(error);
+    if (raw === 'Failed to fetch')
+        return "Couldn't reach the server — the network may be down. Please try again.";
+    // Anthropic SDK exceptions arrive as "400: {<json>}" — extract the inner message.
     const m = /^\d{3}:\s*(\{[\s\S]+)$/.exec(raw);
     if (m) {
         try { return JSON.parse(m[1])?.error?.message || raw; } catch {}
@@ -47,8 +52,8 @@ function withBillingLink(message) {
     return message;
 }
 
-function addError(message) {
-    addMessage(withBillingLink(`Error: ${humanizeError(message)}`), 'assistant');
+function addError(error, retryHint = '') {
+    addMessage(withBillingLink(`Error: ${humanizeError(error)}${retryHint}`), 'assistant');
 }
 
 // DOM elements
@@ -259,7 +264,7 @@ async function startCoachChat(body, errorLabel) {
         await openConversation(data.conversationId);
     } catch (error) {
         startNewChat();
-        addError(error.message);
+        addError(error);
     } finally {
         setCoachRadiosDisabled(false);
     }
@@ -309,7 +314,7 @@ async function enterTopicSetup({ welcome, setupName, endpoint, gridId, cached, o
             topics = data;
         } catch (e) {
             startNewChat();
-            addError(e.message);
+            addError(e);
             return null;
         }
     }
@@ -401,7 +406,7 @@ const MAX_FILE_COUNT = 20;
 const uid = () =>
     (crypto.randomUUID?.() ?? `att-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
-function addFiles(fileList) {
+async function addFiles(fileList) {
     let firstError = null;
     for (const file of Array.from(fileList)) {
         if (pendingAttachments.length >= MAX_FILE_COUNT) {
@@ -419,14 +424,26 @@ function addFiles(fileList) {
         // dedupe by name + size
         if (pendingAttachments.some(a => a.file.name === file.name && a.file.size === file.size)) continue;
 
-        const kind = (file.type === 'application/zip' || /\.zip$/i.test(file.name)) ? 'ZIP'
-                   : file.type.startsWith('image/') ? 'IMAGE'
+        // Copy the bytes into memory now. A File from the picker or drag-drop only
+        // references the disk file, and Chrome aborts the whole request with
+        // ERR_UPLOAD_FILE_CHANGED if that file is touched before fetch reads it
+        // (macOS keeps rewriting fresh screenshots, cloud sync touches files too).
+        let copy;
+        try {
+            copy = new File([await file.arrayBuffer()], file.name, { type: file.type });
+        } catch {
+            firstError = firstError || `Couldn't read "${file.name}" — try attaching it again`;
+            continue;
+        }
+
+        const kind = (copy.type === 'application/zip' || /\.zip$/i.test(copy.name)) ? 'ZIP'
+                   : copy.type.startsWith('image/') ? 'IMAGE'
                    : 'DOCUMENT';
         pendingAttachments.push({
             id: uid(),
-            file,
+            file: copy,
             kind,
-            objectUrl: kind === 'IMAGE' ? URL.createObjectURL(file) : null,
+            objectUrl: kind === 'IMAGE' ? URL.createObjectURL(copy) : null,
         });
     }
     composerError.textContent = firstError || '';
@@ -660,6 +677,10 @@ async function sendMessage() {
     chatMessages.appendChild(loadingMessage);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 
+    // Abort if the server doesn't respond within 6 minutes (server-side timeout is 5m).
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+
     try {
         const payload = JSON.stringify({
             message,
@@ -673,22 +694,22 @@ async function sendMessage() {
             const form = new FormData();
             form.append('request', new Blob([payload], { type: 'application/json' }));
             attachmentsSnapshot.forEach(a => form.append('files', a.file, a.file.name));
-            response = await fetch(`${API_URL}/chat`, { method: 'POST', body: form });
+            response = await fetch(`${API_URL}/chat`, { method: 'POST', body: form, signal: controller.signal });
         } else {
             response = await fetch(`${API_URL}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: payload,
+                signal: controller.signal,
             });
         }
-
-        // Images are already rendered in the DOM; safe to revoke object URLs now
-        attachmentsSnapshot.forEach(a => { if (a.objectUrl) URL.revokeObjectURL(a.objectUrl); });
-
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             throw new Error(err.message || 'Request failed');
         }
+        // Images are already rendered in the DOM; safe to revoke object URLs now.
+        // On any failure the catch keeps them alive for the restored chips instead.
+        attachmentsSnapshot.forEach(a => { if (a.objectUrl) URL.revokeObjectURL(a.objectUrl); });
 
         const data = await response.json();
         loadingMessage.remove();
@@ -711,10 +732,17 @@ async function sendMessage() {
         // so the user can still pick an answer without losing the question.
         chatMessages.querySelectorAll('.quiz-option:disabled')
             .forEach(btn => { btn.disabled = false; });
-        addError(error.message);
+        // Restore attachments so the user can retry without re-attaching.
+        pendingAttachments = attachmentsSnapshot;
+        renderAttachmentStrip();
+        if (message) chatInput.value = message;
+        const retryHint = attachmentsSnapshot.length > 0 || message
+            ? ' Retry: your message and attachments have been restored — press Enter to send again.'
+            : '';
+        addError(error, retryHint);
         activateQuiz();
-        attachmentsSnapshot.forEach(a => { if (a.objectUrl) URL.revokeObjectURL(a.objectUrl); });
     } finally {
+        clearTimeout(abortTimer);
         chatInput.disabled  = false;
         sendButton.disabled = false;
         attachButton.disabled = false;
@@ -751,7 +779,7 @@ async function translateWords(words) {
         buildWordCheck(data.setId, data.items);
     } catch (err) {
         loadingMessage.remove();
-        addError(err.message);
+        addError(err);
     } finally {
         chatInput.disabled = false;
         sendButton.disabled = false;
@@ -882,7 +910,7 @@ async function checkWords(setId, rows, checkBtn) {
         const container = rows[0].closest('.word-check');
         if (container) container.appendChild(actions);
     } catch (err) {
-        addError(err.message);
+        addError(err);
         rows.forEach(r => { r.querySelector('.word-answer').disabled = false; });
     }
 }
@@ -934,7 +962,7 @@ async function practiceMissed(words) {
         setSpanishMode('language');  // switch toggle back to 語
     } catch (err) {
         loadingMessage.remove();
-        addError(err.message);
+        addError(err);
     } finally {
         chatInput.disabled = false;
         sendButton.disabled = false;

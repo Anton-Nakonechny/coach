@@ -137,7 +137,13 @@ public class ChatController {
         String system = meta.map(coachService::systemPrompt).orElse(null);
 
         store.appendMessage(conversationId, "user", message, model.value(), effort, uploaded);
-        String answer = claudeClient.generate(model, store.apiMessages(conversationId), effort, system);
+        String answer;
+        try {
+            answer = claudeClient.generate(model, store.apiMessages(conversationId), effort, system);
+        } catch (RuntimeException e) {
+            store.rollbackLastUserTurn(conversationId);
+            throw e;
+        }
         store.appendMessage(conversationId, "assistant", answer, model.value(), effort);
 
         var sentences = meta

@@ -181,6 +181,38 @@ public class ConversationStore {
         return node.path(field).asText(null);
     }
 
+    /**
+     * Undo the last user turn after a failed model call: remove the trailing line,
+     * delete its remote uploads, and clean up the conversation files entirely when
+     * no messages remain. Best-effort — any IOException is swallowed so it never
+     * masks the original generate() error.
+     */
+    public void rollbackLastUserTurn(String conversationId) {
+        try {
+            Path file = path(conversationId);
+            if (!Files.exists(file)) return;
+            List<String> lines = Files.readAllLines(file, UTF_8);
+            int last = lines.size() - 1;
+            while (last >= 0 && lines.get(last).isBlank()) last--;
+            if (last < 0) return;
+            JsonNode node = mapper.readTree(lines.get(last));
+            if (!"user".equals(text(node, "role"))) return;
+            for (AttachmentMeta a : attachments(node.get("attachments"))) {
+                try {
+                    fileGateway.delete(a.fileId());
+                } catch (RuntimeException ignored) { }
+            }
+            List<String> remaining = lines.subList(0, last);
+            boolean hasContent = remaining.stream().anyMatch(l -> !l.isBlank());
+            if (hasContent) {
+                Files.writeString(file, String.join("\n", remaining) + "\n", UTF_8);
+            } else {
+                Files.deleteIfExists(file);
+                Files.deleteIfExists(metaPath(conversationId));
+            }
+        } catch (IOException ignored) { }
+    }
+
     /** Best-effort delete of a conversation's uploaded files (on archive/delete). */
     private void deleteUploads(String conversationId) {
         for (MessageItem m : loadMessages(conversationId)) {

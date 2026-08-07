@@ -1,5 +1,6 @@
 package com.coach;
 
+import com.anthropic.errors.AnthropicIoException;
 import com.coach.anthropic.AnthropicBlock;
 import com.coach.anthropic.ApiMessage;
 import com.coach.anthropic.AttachmentBlock;
@@ -11,6 +12,7 @@ import com.coach.anthropic.SdkAnthropicGateway;
 import com.coach.anthropic.SdkFileUploadGateway;
 import com.coach.anthropic.TextBlock;
 import com.coach.anthropic.UploadedFile;
+import com.coach.config.AppConfig;
 import com.coach.docs.DocFetchGateway;
 import com.coach.store.ConversationStore;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -56,6 +58,8 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
+
+import com.coach.web.dto.Role;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -123,6 +127,9 @@ class ChatApiTest {
 
     @Autowired
     ConversationStore store;
+
+    @Autowired
+    AppConfig appConfig;
 
     private final Deque<List<AnthropicBlock>> pendingResponses = new ArrayDeque<>();
     private final List<GatewayCall> gatewayCalls = new ArrayList<>();
@@ -844,6 +851,48 @@ class ChatApiTest {
         ResponseEntity<String> resp = postChat(chatBody("hi", "opus-4-8", null, null));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @Test
+    void requestTimeoutConfig_bindsFromProperty() {
+        assertThat(appConfig.requestTimeout()).isGreaterThan(java.time.Duration.ZERO);
+    }
+
+    @Test
+    void fileUpload_uncheckedIoException_returnsNestedCauseInBody() {
+        doThrow(new java.io.UncheckedIOException("outer-wrap", new java.io.IOException("disk-full-inner")))
+                .when(fileUploadGateway).upload(any(), any(), any());
+
+        ResponseEntity<String> resp = postChatMultipart(
+                chatBody("review", "opus-4-8", null, null),
+                List.of(new PartFile("img.png", "image/png", new byte[]{(byte) 0x89, 'P', 'N', 'G'})));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).contains("disk-full-inner");
+    }
+
+    @Test
+    void fileUpload_ioExceptionWithoutMessage_returnsJsonErrorBody() {
+        doThrow(new java.io.UncheckedIOException(new java.io.EOFException()))
+                .when(fileUploadGateway).upload(any(), any(), any());
+
+        ResponseEntity<String> resp = postChatMultipart(
+                chatBody("review", "opus-4-8", null, null),
+                List.of(new PartFile("img.png", "image/png", new byte[]{(byte) 0x89, 'P', 'N', 'G'})));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void anthropicSdkIoException_returnsJsonBodyAsBadGateway() {
+        doThrow(new AnthropicIoException("connection reset by peer"))
+                .when(gateway).createMessage(any(), anyInt(), any(), any(), any());
+
+        ResponseEntity<String> resp = postChat(chatBody("review", "opus-4-8", null, null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
+        assertThat(json(resp).get("message").asText()).contains("connection reset by peer");
     }
 
     // ----------------------------------------------------------------------- //
@@ -2446,5 +2495,117 @@ class ChatApiTest {
     void scriptJs_markedRenderer_opensLinksInNewTab() {
         var js = rest.getForObject(url("/script.js"), String.class);
         assertThat(js).contains("target=\"_blank\" rel=\"noopener noreferrer\"");
+    }
+
+    @Test
+    void scriptJs_sendMessage_hasAbortController() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js).contains("AbortController");
+    }
+
+    @Test
+    void scriptJs_humanizeError_mapsFailedToFetch() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js).contains("humanizeError");
+    }
+
+    @Test
+    void scriptJs_failurePath_offersRetry() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js).contains("Retry");
+    }
+
+    @Test
+    void scriptJs_humanizeError_declaredExactlyOnce() {
+        var js = rest.getForObject(url("/script.js"), String.class);
+        assertThat(js.split("function humanizeError", -1)).hasSize(2);
+    }
+
+    // ----------------------------------------------------------------------- //
+    // Rollback of failed turns (fix: duplicate user turn / phantom conversation)
+    // ----------------------------------------------------------------------- //
+
+    @Test
+    void chatFailureOnExistingConversation_rollsBackUserTurn_soRetryDoesNotDuplicate() {
+        queueText("first answer");
+        var cid = json(postChat(chatBody("q1", "opus-4-8", null, null)))
+                .get("conversationId").asText();
+        assertThat(store.loadMessages(cid)).hasSize(2);
+
+        doThrow(new RuntimeException("upstream boom"))
+                .when(gateway).createMessage(any(), anyInt(), any(), any(), any());
+        assertThat(postChat(chatBody("again", "opus-4-8", null, cid)).getStatusCode())
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        var afterFailure = store.loadMessages(cid);
+        assertThat(afterFailure).hasSize(2);
+        assertThat(afterFailure.get(1).role()).isEqualTo(Role.ASSISTANT);
+
+        restoreGatewayAnswer();
+        queueText("retry answer");
+        assertThat(postChat(chatBody("again", "opus-4-8", null, cid)).getStatusCode())
+                .isEqualTo(HttpStatus.OK);
+        var afterRetry = store.loadMessages(cid);
+        assertThat(afterRetry).hasSize(4);
+        long againCount = afterRetry.stream()
+                .filter(m -> m.role() == Role.USER && "again".equals(m.content()))
+                .count();
+        assertThat(againCount).isEqualTo(1);
+    }
+
+    @Test
+    void chatFailureOnNewConversation_leavesNoPhantomConversation() throws IOException {
+        doThrow(new RuntimeException("upstream boom"))
+                .when(gateway).createMessage(any(), anyInt(), any(), any(), any());
+
+        assertThat(postChat(chatBody("hi", "opus-4-8", null, null)).getStatusCode())
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+
+        assertThat(json(rest.getForEntity(url("/api/conversations"), String.class))).isEmpty();
+        try (var paths = Files.list(CONV_DIR)) {
+            assertThat(paths.filter(p -> p.toString().endsWith(".jsonl")).toList()).isEmpty();
+        }
+    }
+
+    @Test
+    void chatFailureWithAttachment_rollsBackUserTurnAndDeletesUpload() throws IOException {
+        doThrow(new RuntimeException("upstream boom"))
+                .when(gateway).createMessage(any(), anyInt(), any(), any(), any());
+
+        var resp = postChatMultipart(
+                chatBody("review", "opus-4-8", null, null),
+                List.of(new PartFile("img.png", "image/png",
+                        new byte[]{(byte) 0x89, 'P', 'N', 'G'})));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(deleted).contains("file_test_0001");
+        assertThat(json(rest.getForEntity(url("/api/conversations"), String.class))).isEmpty();
+    }
+
+    @Test
+    void coachStartFailure_removesSidecar() throws IOException {
+        writeCooPrompt("01-prd.md", "SCENARIO");
+        doThrow(new RuntimeException("upstream boom"))
+                .when(gateway).createMessage(any(), anyInt(), any(), any(), any());
+
+        assertThat(postChat(coachBody("chief-operating-officer")).getStatusCode())
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+
+        try (var paths = Files.list(CONV_DIR)) {
+            var leftovers = paths
+                    .filter(p -> p.toString().endsWith(".jsonl") || p.toString().endsWith(".meta.json"))
+                    .toList();
+            assertThat(leftovers).isEmpty();
+        }
+    }
+
+    private void restoreGatewayAnswer() {
+        doAnswer(inv -> {
+            gatewayCalls.add(new GatewayCall(
+                inv.getArgument(0), inv.getArgument(1), inv.getArgument(2),
+                List.copyOf(inv.getArgument(3)), Map.copyOf(inv.getArgument(4))));
+            return pendingResponses.isEmpty()
+                ? List.of(new AnthropicBlock("text", "(no scripted response)"))
+                : pendingResponses.poll();
+        }).when(gateway).createMessage(any(), anyInt(), any(), any(), any());
     }
 }
