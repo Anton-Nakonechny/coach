@@ -32,8 +32,13 @@
         <div class="main-content">
             <!-- Left Sidebar -->
             <aside class="sidebar" id="sidebar">
-                <div class="sidebar-section">
+                <div class="sidebar-section sidebar-top-row">
                     <button id="newChatButton" class="new-chat-button">+ New Chat</button>
+                    <button id="sidebarCollapse" class="icon-button panel-collapse-btn" aria-label="Hide sidebar" title="Hide sidebar">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="15 18 9 12 15 6"></polyline>
+                        </svg>
+                    </button>
                 </div>
 
                 <!-- Model selection -->
@@ -106,7 +111,14 @@
             <!-- Right coach panel -->
             <aside class="coach-panel" id="coachPanel">
                 <div class="sidebar-section">
-                    <div class="sidebar-label">Coach</div>
+                    <div class="coach-top-row">
+                        <div class="sidebar-label">Coach</div>
+                        <button id="coachCollapse" class="icon-button panel-collapse-btn" aria-label="Hide coach panel" title="Hide coach panel">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                        </button>
+                    </div>
                     <div class="coach-options">
                         <label><input type="radio" name="coach" value="none" checked> None</label>
                         <label><input type="radio" name="coach" value="chief-operating-officer"> Chief Operating Officer</label>
@@ -124,6 +136,18 @@
             </aside>
 
             <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+
+            <!-- Bookmark-like tabs to restore a collapsed desktop panel -->
+            <button id="sidebarRestore" class="panel-restore-tab sidebar-restore" aria-label="Show sidebar" title="Show sidebar" hidden>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+            </button>
+            <button id="coachRestore" class="panel-restore-tab coach-restore" aria-label="Show coach panel" title="Show coach panel" hidden>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="15 18 9 12 15 6"></polyline>
+                </svg>
+            </button>
         </div>
     </div>
 

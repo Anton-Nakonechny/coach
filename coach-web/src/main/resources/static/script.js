@@ -61,7 +61,8 @@ let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
     conversationList, clearAllButton, attachButton, fileInput, attachmentStrip,
     composerError, dropOverlay, coachNote,
     sidebar, coachPanel, sidebarToggle, coachToggle, drawerBackdrop,
-    spanishModeToggle;
+    spanishModeToggle,
+    sidebarCollapse, coachCollapse, sidebarRestore, coachRestore;
 
 document.addEventListener('DOMContentLoaded', async () => {
     chatMessages    = document.getElementById('chatMessages');
@@ -84,9 +85,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     coachToggle        = document.getElementById('coachToggle');
     drawerBackdrop     = document.getElementById('drawerBackdrop');
     spanishModeToggle  = document.getElementById('spanishModeToggle');
+    sidebarCollapse    = document.getElementById('sidebarCollapse');
+    coachCollapse      = document.getElementById('coachCollapse');
+    sidebarRestore     = document.getElementById('sidebarRestore');
+    coachRestore       = document.getElementById('coachRestore');
 
     setupEventListeners();
     setupDragAndDrop();
+    applyPanelState();
     await loadModels();
     await loadConversations();
     startNewChat();
@@ -128,6 +134,37 @@ function setupEventListeners() {
     mobileQuery.addEventListener('change', (e) => { if (!e.matches) closeDrawers(); });
     // 語/字 mode toggle — a click anywhere on the chip flips between the two modes
     spanishModeToggle.addEventListener('click', switchSpanishMode);
+    sidebarCollapse.addEventListener('click', () => togglePanelCollapsed('sidebar'));
+    sidebarRestore.addEventListener('click', () => togglePanelCollapsed('sidebar'));
+    coachCollapse.addEventListener('click', () => togglePanelCollapsed('coach'));
+    coachRestore.addEventListener('click', () => togglePanelCollapsed('coach'));
+}
+
+// ── Desktop panel collapse ──────────────────────────────────────
+// Independent of the mobile drawers above: lets a wide-screen user permanently
+// hide a rail to free up chat width, persisted so a reload doesn't spring it
+// back open. CSS scopes .collapsed / .panel-restore-tab to desktop widths only,
+// so this state is inert on phones where the header drawer toggles apply instead.
+
+const PANEL_COLLAPSE_KEY = 'coach.collapsedPanels';
+
+function loadCollapsedPanels() {
+    try { return JSON.parse(localStorage.getItem(PANEL_COLLAPSE_KEY)) || {}; } catch { return {}; }
+}
+
+function applyPanelState() {
+    const collapsed = loadCollapsedPanels();
+    sidebar.classList.toggle('collapsed', !!collapsed.sidebar);
+    sidebarRestore.hidden = !collapsed.sidebar;
+    coachPanel.classList.toggle('collapsed', !!collapsed.coach);
+    coachRestore.hidden = !collapsed.coach;
+}
+
+function togglePanelCollapsed(key) {
+    const collapsed = loadCollapsedPanels();
+    collapsed[key] = !collapsed[key];
+    localStorage.setItem(PANEL_COLLAPSE_KEY, JSON.stringify(collapsed));
+    applyPanelState();
 }
 
 function setSpanishMode(mode) {
