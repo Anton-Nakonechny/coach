@@ -43,6 +43,7 @@ header { display: none; }
 
 /* Main Content Area with Sidebar */
 .main-content {
+    position: relative;
     flex: 1;
     display: flex;
     overflow: hidden;
@@ -66,6 +67,17 @@ header { display: none; }
 
 .sidebar-section { margin-bottom: 1.5rem; }
 .sidebar-section:last-child { margin-bottom: 0; }
+
+/* Top row of each rail: primary control + collapse button */
+.sidebar-top-row, .coach-top-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+.coach-top-row { margin-bottom: 0.5rem; }
+.coach-top-row .sidebar-label { margin-bottom: 0; }
+.panel-collapse-btn { flex-shrink: 0; }
 
 .sidebar-label {
     font-size: 0.75rem;
@@ -489,6 +501,32 @@ header { display: none; }
     min-height: 1rem;
 }
 
+/* ── Desktop panel collapse ──────────────────────────────────── */
+
+/* Small bookmark-like tab docked to the freed-up edge, shown while its panel is hidden */
+.panel-restore-tab {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 18px;
+    height: 56px;
+    padding: 0;
+    background: var(--surface);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    cursor: pointer;
+    z-index: 5;
+    transition: color 0.2s ease, border-color 0.2s ease;
+}
+.panel-restore-tab[hidden] { display: none; }
+.panel-restore-tab:hover { color: var(--primary-color); border-color: var(--primary-color); }
+.panel-restore-tab:focus { outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
+.panel-restore-tab.sidebar-restore { left: 0; border-left: none; border-radius: 0 8px 8px 0; }
+.panel-restore-tab.coach-restore { right: 0; border-right: none; border-radius: 8px 0 0 8px; }
+
 /* ── Spanish topic grid ─────────────────────────────────────── */
 
 .topic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.5rem; padding: 0.5rem 0; }
@@ -564,6 +602,17 @@ header { display: none; }
 @media (min-width: 769px) and (max-width: 1024px) {
     .sidebar { width: 320px; }
     .coach-panel { width: 200px; }
+}
+
+/* Desktop/tablet: panels can be collapsed to free up chat width, restored via the tab left behind */
+@media (min-width: 769px) {
+    .sidebar.collapsed, .coach-panel.collapsed { display: none; }
+}
+
+/* Phone: rails are already slide-in drawers toggled from the header — hide the
+   desktop-only collapse controls so the two mechanisms don't overlap. */
+@media (max-width: 768px) {
+    .panel-collapse-btn, .panel-restore-tab { display: none; }
 }
 
 /* Phone: full-screen chat, rails become slide-in drawers.
