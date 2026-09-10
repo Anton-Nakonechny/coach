@@ -1,6 +1,7 @@
 package com.coach.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
 
 import java.time.Duration;
 import java.util.List;
@@ -15,6 +16,7 @@ import java.util.List;
  * @param requestTimeout   maximum time for a complete Anthropic API call; generous for image reviews.
  * @param upload           file-attachment limits.
  * @param docs             official-documentation grounding settings.
+ * @param noam             noam vocabulary-platform integration.
  */
 @ConfigurationProperties(prefix = "coach")
 public record AppConfig(
@@ -24,7 +26,8 @@ public record AppConfig(
         String coachesDir,
         Duration requestTimeout,
         Upload upload,
-        Docs docs
+        Docs docs,
+        @DefaultValue Noam noam
 ) {
 
     /**
@@ -55,5 +58,18 @@ public record AppConfig(
             int maxZipEntries,
             long maxTotalExtractedBytes,
             List<String> allowedMimeTypes
+    ) { }
+
+    /**
+     * noam vocabulary-platform integration (bound from {@code coach.noam.*}).
+     *
+     * @param baseUrl   root of the noam REST API, e.g. http://localhost:8080/api/v1.
+     * @param profileId study profile whose known-set filters study items; hardcoded for v1.
+     * @param userId    owning noam user, used only for server-side write-backs; never sent to the browser.
+     */
+    public record Noam(
+            @DefaultValue("") String baseUrl,
+            @DefaultValue("") String profileId,
+            @DefaultValue("") String userId
     ) { }
 }
