@@ -3,6 +3,7 @@ package com.coach.web;
 import com.anthropic.errors.AnthropicException;
 import com.coach.attach.UploadException;
 import com.coach.coach.InvalidRequestException;
+import com.coach.noam.NoamUnavailableException;
 import org.springframework.core.NestedExceptionUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -71,6 +72,11 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(AnthropicException.class)
     public ResponseEntity<Map<String, Object>> handleAnthropicSdk(AnthropicException ex) {
+        return body(HttpStatus.BAD_GATEWAY, ex.getMessage());
+    }
+
+    @ExceptionHandler(NoamUnavailableException.class)
+    public ResponseEntity<Map<String, Object>> handleNoamUnavailable(NoamUnavailableException ex) {
         return body(HttpStatus.BAD_GATEWAY, ex.getMessage());
     }
 
