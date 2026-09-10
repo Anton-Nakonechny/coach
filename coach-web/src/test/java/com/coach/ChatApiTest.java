@@ -14,6 +14,8 @@ import com.coach.anthropic.TextBlock;
 import com.coach.anthropic.UploadedFile;
 import com.coach.config.AppConfig;
 import com.coach.docs.DocFetchGateway;
+import com.coach.noam.NoamGateway;
+import com.coach.noam.NoamUnavailableException;
 import com.coach.store.ConversationStore;
 import com.coach.word.WordPair;
 import com.coach.word.WordSetStore;
@@ -69,6 +71,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
@@ -131,6 +134,9 @@ class ChatApiTest {
 
     @MockitoBean
     DocFetchGateway docFetchGateway;
+
+    @MockitoBean
+    NoamGateway noamGateway;
 
     @Autowired
     ConversationStore store;
@@ -2808,6 +2814,67 @@ class ChatApiTest {
         assertThat(response.getBody()).contains("profile-test-1");
         assertThat(response.getBody()).doesNotContain("userId");
         assertThat(response.getBody()).doesNotContain("user-test-secret");
+    }
+
+    @Test
+    void lexemeStatesRouteForwardsIdsAndState() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("lexemeIds", List.of("id1", "id2"));
+        body.put("state", "KNOWN");
+
+        var response = rest.postForEntity(url("/api/noam/lexeme-states"), body, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        verify(noamGateway).setLexemeStates(List.of("id1", "id2"), "KNOWN");
+    }
+
+    @Test
+    void lexemeStatesRejectsUnknownState() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("lexemeIds", List.of("id1"));
+        body.put("state", "BANANA");
+
+        var response = rest.postForEntity(url("/api/noam/lexeme-states"), body, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(response).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void lexemeStatesRejectsMissingState() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("lexemeIds", List.of("id1"));
+
+        var response = rest.postForEntity(url("/api/noam/lexeme-states"), body, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(response).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void lexemeStatesWithNoIdsIsANoOp() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("lexemeIds", List.of());
+        body.put("state", "KNOWN");
+
+        var response = rest.postForEntity(url("/api/noam/lexeme-states"), body, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        verifyNoInteractions(noamGateway);
+    }
+
+    @Test
+    void lexemeStatesReportsNoamDownAs502() {
+        doThrow(new NoamUnavailableException("noam is down"))
+                .when(noamGateway).setLexemeStates(any(), any());
+        Map<String, Object> body = new HashMap<>();
+        body.put("lexemeIds", List.of("id1"));
+        body.put("state", "KNOWN");
+
+        var response = rest.postForEntity(url("/api/noam/lexeme-states"), body, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
+        assertThat(json(response).get("message").asText()).isNotBlank();
     }
 
     private void restoreGatewayAnswer() {
