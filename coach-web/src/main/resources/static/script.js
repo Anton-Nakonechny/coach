@@ -591,7 +591,10 @@ function setupDragAndDrop() {
     const container = document.querySelector('.chat-input-container');
     let dragCounter = 0;
 
-    const isFileDrag = e => e.dataTransfer?.types?.includes('Files');
+    // 文 mode brings its own drop zone on the documents grid, and its composer can't send
+    // anything anyway, so the composer's drag affordances stand down there: otherwise both
+    // overlays light up at once and a near-miss drop becomes an unsendable attachment.
+    const isFileDrag = e => activeSetup !== 'noam' && e.dataTransfer?.types?.includes('Files');
 
     document.addEventListener('dragenter', (e) => {
         if (!isFileDrag(e)) return;
@@ -621,6 +624,7 @@ function setupDragAndDrop() {
     });
 
     container.addEventListener('drop', (e) => {
+        if (activeSetup === 'noam') return;
         addFiles(e.dataTransfer.files);
     });
 }
