@@ -2650,6 +2650,92 @@ class ChatApiTest {
     }
 
     @Test
+    void checkPostsOneReviewPerLexemeWithMappedGrades() {
+        List<Map<String, Object>> items = List.of(
+                Map.of("lexemeId", "lex-good", "spanish", "caber", "english", "to fit"),
+                Map.of("lexemeId", "lex-hard", "spanish", "pala", "english", "shovel"),
+                Map.of("lexemeId", "lex-again", "spanish", "cráneo", "english", "skull"));
+
+        var seedResp = json(postSeed(Map.of("items", items)));
+        String setId = seedResp.get("setId").asText();
+
+        Map<String, String> answerByEnglish = Map.of(
+                "to fit", "caber",   // clean correct
+                "shovel", "pala",   // correct, but full hint revealed
+                "skull", "wrong");  // wrong
+        List<String> answers = new ArrayList<>();
+        List<Boolean> hintsUsed = new ArrayList<>();
+        for (JsonNode item : seedResp.get("items")) {
+            String english = item.get("english").asText();
+            answers.add(answerByEnglish.get(english));
+            hintsUsed.add("shovel".equals(english));
+        }
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", setId);
+        checkBody.put("answers", answers);
+        checkBody.put("hintsUsed", hintsUsed);
+        var resp = postCheck(checkBody);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        verify(noamGateway).recordReview("lex-good", "GOOD");
+        verify(noamGateway).recordReview("lex-hard", "HARD");
+        verify(noamGateway).recordReview("lex-again", "AGAIN");
+    }
+
+    @Test
+    void checkPostsNoReviewsForTypedWordList() {
+        queueText("(caber) to fit\n(pala) shovel");
+        var t = json(postTranslate(Map.of("words", "caber, pala")));
+
+        Map<String, String> answerByEnglish = Map.of("to fit", "caber", "shovel", "wrong");
+        List<String> answers = new ArrayList<>();
+        for (JsonNode item : t.get("items"))
+            answers.add(answerByEnglish.get(item.get("english").asText()));
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", t.get("setId").asText());
+        checkBody.put("answers", answers);
+        var resp = postCheck(checkBody);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        verifyNoInteractions(noamGateway);
+    }
+
+    @Test
+    void checkStillGradesWhenNoamIsDown() {
+        doThrow(new NoamUnavailableException("noam is down"))
+                .when(noamGateway).recordReview(any(), any());
+        List<Map<String, Object>> items = List.of(
+                Map.of("lexemeId", "lex-1", "spanish", "caber", "english", "to fit"),
+                Map.of("lexemeId", "lex-2", "spanish", "pala", "english", "shovel"));
+
+        var seedResp = json(postSeed(Map.of("items", items)));
+        String setId = seedResp.get("setId").asText();
+
+        Map<String, String> answerByEnglish = Map.of("to fit", "caber", "shovel", "wrong");
+        List<String> answers = new ArrayList<>();
+        for (JsonNode item : seedResp.get("items"))
+            answers.add(answerByEnglish.get(item.get("english").asText()));
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", setId);
+        checkBody.put("answers", answers);
+        var resp = postCheck(checkBody);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode results = json(resp).get("results");
+        assertThat(results).hasSize(2);
+        Map<String, JsonNode> resultByEnglish = new HashMap<>();
+        results.forEach(r -> resultByEnglish.put(r.get("english").asText(), r));
+        assertThat(resultByEnglish.get("to fit").get("correct").asBoolean()).isTrue();
+        assertThat(resultByEnglish.get("shovel").get("correct").asBoolean()).isFalse();
+        // The outage is swallowed per word, so a failure on one does not skip the rest.
+        verify(noamGateway).recordReview("lex-1", "GOOD");
+        verify(noamGateway).recordReview("lex-2", "AGAIN");
+    }
+
+    @Test
     void spanishChatWithoutTopic_wordsSeed_persistsAndSystemHasNoTema() throws IOException {
         queueText("(cráneo) Use this skull.\n(pala) The shovel is big.");
 
