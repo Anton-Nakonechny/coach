@@ -24,7 +24,7 @@ import java.util.List;
  * {@code HttpServer} in {@code NoamGatewayTest}).
  */
 @Component
-public class NoamGateway {
+public class NoamGateway implements AutoCloseable {
 
     /** noam's {@code lexemeIds} maxItems for the bulk lexeme-states call. */
     private static final int MAX_CHUNK = 500;
@@ -69,17 +69,27 @@ public class NoamGateway {
     }
 
     private HttpRequest.Builder request(String path) {
-        return HttpRequest.newBuilder(URI.create(config.baseUrl() + path))
-                .timeout(Duration.ofSeconds(30))
-                .header("Content-Type", "application/json");
+        try {
+            return HttpRequest.newBuilder(URI.create(config.baseUrl() + path))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Content-Type", "application/json");
+        } catch (IllegalArgumentException e) {
+            throw new NoamUnavailableException("noam base URL is not configured", e);
+        }
     }
 
     private String writeJson(Object body) {
         try {
             return mapper.writeValueAsString(body);
         } catch (JsonProcessingException e) {
-            throw new NoamUnavailableException("Failed to build noam request body", e);
+            throw new IllegalStateException("Failed to build noam request body", e);
         }
+    }
+
+    /** Releases the underlying {@link HttpClient}'s resources. */
+    @Override
+    public void close() {
+        client.close();
     }
 
     private void send(HttpRequest.Builder requestBuilder) {

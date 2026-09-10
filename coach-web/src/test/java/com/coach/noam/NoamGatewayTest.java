@@ -51,6 +51,7 @@ class NoamGatewayTest {
     @AfterEach
     void stopServer() {
         server.stop(0);
+        gateway.close();
     }
 
     private void respond(HttpExchange exchange, int status, String body) throws IOException {
@@ -136,5 +137,19 @@ class NoamGatewayTest {
 
         assertThatThrownBy(() -> gateway.setLexemeStates(List.of("id1"), "KNOWN"))
                 .isInstanceOf(NoamUnavailableException.class);
+    }
+
+    @Test
+    void blankBaseUrlThrowsNoamUnavailableExceptionInsteadOfIllegalArgumentException() {
+        var config = new AppConfig(null, 0, null, null, null, null, null,
+                new AppConfig.Noam("", "profile-1", "user-1"));
+        var unconfiguredGateway = new NoamGateway(config, mapper);
+
+        assertThatThrownBy(() -> unconfiguredGateway.setLexemeStates(List.of("id1"), "KNOWN"))
+                .isInstanceOf(NoamUnavailableException.class);
+        assertThatThrownBy(() -> unconfiguredGateway.recordReview("id1", "GOOD"))
+                .isInstanceOf(NoamUnavailableException.class);
+
+        unconfiguredGateway.close();
     }
 }

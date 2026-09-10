@@ -43,7 +43,7 @@ public class NoamController {
     @PostMapping("/lexeme-states")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void lexemeStates(@RequestBody LexemeStatesRequest request) {
-        if (!VALID_STATES.contains(request.state()))
+        if (request.state() == null || !VALID_STATES.contains(request.state()))
             throw new InvalidRequestException("state must be one of KNOWN, IGNORED, NEW");
         var lexemeIds = request.lexemeIds();
         if (lexemeIds == null || lexemeIds.isEmpty()) return;

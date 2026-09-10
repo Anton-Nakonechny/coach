@@ -2841,6 +2841,17 @@ class ChatApiTest {
     }
 
     @Test
+    void lexemeStatesRejectsMissingState() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("lexemeIds", List.of("id1"));
+
+        var response = rest.postForEntity(url("/api/noam/lexeme-states"), body, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(response).get("message").asText()).isNotBlank();
+    }
+
+    @Test
     void lexemeStatesWithNoIdsIsANoOp() {
         Map<String, Object> body = new HashMap<>();
         body.put("lexemeIds", List.of());
