@@ -108,6 +108,11 @@ class ChatApiTest {
         // can be exercised with modest inputs.
         registry.add("coach.docs.cache-dir", () -> COACHES_DIR.resolve("Claude").resolve("docs").toString());
         registry.add("coach.docs.max-chars", () -> 10000);
+        // noam vocabulary platform: baseUrl/profileId are safe to expose to the
+        // browser; userId must never leave the server (see the tests below).
+        registry.add("coach.noam.base-url", () -> "http://localhost:8080/api/v1");
+        registry.add("coach.noam.profile-id", () -> "profile-test-1");
+        registry.add("coach.noam.user-id", () -> "user-test-secret");
     }
 
     @LocalServerPort
@@ -2596,6 +2601,27 @@ class ChatApiTest {
                     .toList();
             assertThat(leftovers).isEmpty();
         }
+    }
+
+    @Test
+    void noamConfigReturnsBaseUrlAndProfileId() {
+        var response = rest.getForEntity(url("/api/noam/config"), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var body = json(response);
+        assertThat(body.get("baseUrl").asText()).isEqualTo("http://localhost:8080/api/v1");
+        assertThat(body.get("profileId").asText()).isEqualTo("profile-test-1");
+        assertThat(body.size()).isEqualTo(2);
+    }
+
+    @Test
+    void noamConfigNeverExposesUserId() {
+        var response = rest.getForEntity(url("/api/noam/config"), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).contains("profile-test-1");
+        assertThat(response.getBody()).doesNotContain("userId");
+        assertThat(response.getBody()).doesNotContain("user-test-secret");
     }
 
     private void restoreGatewayAnswer() {

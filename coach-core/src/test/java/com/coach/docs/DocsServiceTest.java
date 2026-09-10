@@ -50,7 +50,8 @@ class DocsServiceTest {
     }
 
     private DocsService docsService(int maxChars) {
-        var config = new AppConfig(null, 0, null, null, null, null, new AppConfig.Docs(null, null, maxChars));
+        var config = new AppConfig(null, 0, null, null, null, null,
+                new AppConfig.Docs(null, null, maxChars), null);
         return new DocsService(gateway, cache, config);
     }
 
