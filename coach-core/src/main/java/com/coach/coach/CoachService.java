@@ -354,7 +354,7 @@ public class CoachService {
                 .map(line -> line.replaceFirst("\\s+-\\s+.*|[–—].*", ""))
                 .flatMap(line -> Arrays.stream(line.split(",")))
                 .map(String::trim)
-                .map(s -> s.replaceAll("^[^\\p{L}]+|[^\\p{L}]+$", ""))
+                .map(Text::stripEdges)
                 .filter(s -> !s.isEmpty())
                 .toList();
     }
@@ -407,7 +407,7 @@ public class CoachService {
             SentenceItem item = items.get(i);
             String norm = Text.normalizeKey(item.hint());
             String original = normToOrig.getOrDefault(norm, tokens.get(i));
-            pairs.add(new WordPair(item.sentence(), original));
+            pairs.add(new WordPair(item.sentence(), original, null));
         }
         return pairs;
     }

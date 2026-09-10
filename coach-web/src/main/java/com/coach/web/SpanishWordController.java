@@ -8,10 +8,12 @@ import com.coach.coach.Text;
 import com.coach.coach.InvalidRequestException;
 import com.coach.model.ModelKey;
 import com.coach.model.ModelsConfig;
+import com.coach.web.dto.SeedItem;
 import com.coach.web.dto.WordCheckRequest;
 import com.coach.web.dto.WordCheckResponse;
 import com.coach.web.dto.WordPrompt;
 import com.coach.web.dto.WordResult;
+import com.coach.web.dto.WordSeedRequest;
 import com.coach.web.dto.WordTranslateRequest;
 import com.coach.web.dto.WordTranslateResponse;
 import com.coach.word.WordPair;
@@ -66,12 +68,29 @@ public class SpanishWordController {
         List<WordPair> shuffled = new ArrayList<>(pairs);
         Collections.shuffle(shuffled);
 
-        String setId = wordSetStore.put(shuffled);
-        List<WordPrompt> items = shuffled.stream()
-                .map(p -> new WordPrompt(p.english(), coachService.maskHint(p.spanishOriginal()),
-                        p.spanishOriginal()))
-                .toList();
-        return new WordTranslateResponse(setId, items);
+        return respond(shuffled);
+    }
+
+    /**
+     * Mint a set from client-supplied {@code {lexemeId, spanish, english}} triples — no
+     * LLM call, since the translations already exist upstream (e.g. noam). Returns the
+     * same shape as {@link #translate}, so a seeded set is indistinguishable downstream.
+     */
+    @PostMapping("/seed")
+    public WordTranslateResponse seed(@RequestBody WordSeedRequest request) {
+        List<SeedItem> requested = request.items() == null ? List.of() : request.items();
+        if (requested.isEmpty())
+            throw new InvalidRequestException("word list must not be empty");
+        for (SeedItem item : requested)
+            if (item == null || isBlank(item.spanish()) || isBlank(item.english()))
+                throw new InvalidRequestException("spanish and english must not be blank");
+
+        List<WordPair> pairs = new ArrayList<>();
+        for (SeedItem item : requested)
+            pairs.add(new WordPair(item.english(), Text.stripEdges(item.spanish()), item.lexemeId()));
+        Collections.shuffle(pairs);
+
+        return respond(pairs);
     }
 
     /**
@@ -95,5 +114,19 @@ public class SpanishWordController {
             results.add(new WordResult(pair.english(), pair.spanishOriginal(), correct, fullHint));
         }
         return new WordCheckResponse(results);
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    /** Store {@code pairs} and build the shared translate/seed response from the same list. */
+    private WordTranslateResponse respond(List<WordPair> pairs) {
+        String setId = wordSetStore.put(pairs);
+        List<WordPrompt> items = pairs.stream()
+                .map(p -> new WordPrompt(p.english(), coachService.maskHint(p.spanishOriginal()),
+                        p.spanishOriginal()))
+                .toList();
+        return new WordTranslateResponse(setId, items);
     }
 }

@@ -9,6 +9,7 @@ public final class Text {
 
     private static final Pattern DIACRITICS = Pattern.compile("\\p{M}");
     private static final Pattern SPACES = Pattern.compile("\\s+");
+    private static final Pattern EDGE_NON_LETTERS = Pattern.compile("^[^\\p{L}]+|[^\\p{L}]+$");
 
     private Text() {}
 
@@ -21,5 +22,13 @@ public final class Text {
         String nfd = Normalizer.normalize(s, Normalizer.Form.NFD);
         String stripped = DIACRITICS.matcher(nfd).replaceAll("");
         return SPACES.matcher(stripped.toLowerCase(Locale.ROOT).trim()).replaceAll(" ");
+    }
+
+    /**
+     * Strip leading/trailing non-letter characters (e.g. wrapping {@code ( )}, quotes, or
+     * list numbering) so they don't leak into a stored or graded word.
+     */
+    public static String stripEdges(String s) {
+        return EDGE_NON_LETTERS.matcher(s).replaceAll("");
     }
 }
