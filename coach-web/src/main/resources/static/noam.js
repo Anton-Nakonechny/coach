@@ -374,6 +374,9 @@ async function performNoamUpload(file, title, { onError } = {}) {
         onError && onError('El archivo supera el límite de 32 MB.');
         return false;
     }
+    // Same reason fetchAndRenderDocuments waits: a file can be dropped or submitted right
+    // after entering 文 mode, while the availability probe is still resolving.
+    await noamProbe;
     if (!noamConfig || !noamConfig.baseUrl) {
         onError && onError('noam no está disponible.');
         return false;
@@ -422,6 +425,9 @@ function addOptimisticDocument(job, title) {
 // ── "Subir documento" modal ───────────────────────────────────
 
 function openUploadModal() {
+    // Mirrors closeUploadModal's guard: reopening mid-upload would strand the busy backdrop
+    // in the DOM with no reference left to remove it.
+    if (noamUploadInFlight) return;
     closeUploadModal();
 
     const backdrop = document.createElement('div');
