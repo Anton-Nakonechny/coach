@@ -855,7 +855,7 @@ function buildWordCheck(setId, items) {
 
     const inputMinWidth = `${Math.max(...items.map(i => i.spanish.length)) + 5}ch`;
 
-    const rows = items.map(item => {
+    const rows = items.map((item, index) => {
         const row = document.createElement('div');
         row.className = 'word-row';
 
@@ -882,8 +882,14 @@ function buildWordCheck(setId, items) {
         input.className = 'word-answer';
         input.placeholder = 'español…';
         input.style.minWidth = inputMinWidth;
+        // Enter walks down the list; only the last row submits. Submitting early would
+        // grade every untouched row as wrong, and a wrong grade is now reported to noam.
         input.addEventListener('keydown', e => {
-            if (e.key === 'Enter') { e.preventDefault(); checkWords(setId, rows, checkBtn); }
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            const next = rows[index + 1];
+            if (next) next.querySelector('.word-answer').focus();
+            else checkWords(setId, rows, checkBtn);
         });
 
         row.appendChild(english);
