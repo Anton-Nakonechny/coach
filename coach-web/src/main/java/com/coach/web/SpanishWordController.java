@@ -8,6 +8,8 @@ import com.coach.coach.Text;
 import com.coach.coach.InvalidRequestException;
 import com.coach.model.ModelKey;
 import com.coach.model.ModelsConfig;
+import com.coach.noam.NoamGateway;
+import com.coach.noam.NoamUnavailableException;
 import com.coach.web.dto.SeedItem;
 import com.coach.web.dto.WordCheckRequest;
 import com.coach.web.dto.WordCheckResponse;
@@ -18,6 +20,8 @@ import com.coach.web.dto.WordTranslateRequest;
 import com.coach.web.dto.WordTranslateResponse;
 import com.coach.word.WordPair;
 import com.coach.word.WordSetStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -35,17 +39,21 @@ import java.util.List;
 @RequestMapping("/api/spanish/words")
 public class SpanishWordController {
 
+    private static final Logger log = LoggerFactory.getLogger(SpanishWordController.class);
+
     private final ClaudeClient claudeClient;
     private final CoachService coachService;
     private final WordSetStore wordSetStore;
     private final ModelsConfig models;
+    private final NoamGateway noamGateway;
 
     public SpanishWordController(ClaudeClient claudeClient, CoachService coachService,
-                                 WordSetStore wordSetStore, ModelsConfig models) {
+                                 WordSetStore wordSetStore, ModelsConfig models, NoamGateway noamGateway) {
         this.claudeClient = claudeClient;
         this.coachService = coachService;
         this.wordSetStore = wordSetStore;
         this.models = models;
+        this.noamGateway = noamGateway;
     }
 
     /**
@@ -113,7 +121,32 @@ public class SpanishWordController {
             boolean fullHint = i < hintsUsed.size() && Boolean.TRUE.equals(hintsUsed.get(i));
             results.add(new WordResult(pair.english(), pair.spanishOriginal(), correct, fullHint));
         }
+        reportReviews(pairs, results);
         return new WordCheckResponse(results);
+    }
+
+    /**
+     * Post one noam review per pair with a lexeme id. A noam outage must not fail the quiz,
+     * and it is swallowed per word: the set is single-use, so one failed post must not cost
+     * the grades of every word after it.
+     */
+    private void reportReviews(List<WordPair> pairs, List<WordResult> results) {
+        for (int i = 0; i < pairs.size(); i++) {
+            String lexemeId = pairs.get(i).lexemeId();
+            if (isBlank(lexemeId)) continue;
+            WordResult result = results.get(i);
+            try {
+                noamGateway.recordReview(lexemeId, grade(result.correct(), result.fullHint()));
+            } catch (NoamUnavailableException e) {
+                log.warn("Failed to report word-quiz review for {} to noam: {}", lexemeId, e.toString());
+            }
+        }
+    }
+
+    static String grade(boolean correct, boolean fullHint) {
+        if (correct && !fullHint) return "GOOD";
+        if (correct) return "HARD";
+        return "AGAIN";
     }
 
     private static boolean isBlank(String s) {
