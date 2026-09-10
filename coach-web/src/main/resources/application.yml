@@ -72,5 +72,5 @@ coach:
   # through NoamGateway server-side, which is why user-id never leaves the server.
   noam:
     base-url: http://localhost:8080/api/v1
-    profile-id: ""
-    user-id: ""
+    profile-id: "00000000-0000-0000-0000-000000000002"
+    user-id: "00000000-0000-0000-0000-000000000001"
