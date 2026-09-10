@@ -546,8 +546,8 @@ header { display: none; }
 .mode-btn:last-child  { border-radius: 0 7px 7px 0; }
 .mode-btn.active { background: var(--coach-accent); color: #fff; }
 .mode-btn:focus-visible { outline: 2px solid var(--coach-accent); outline-offset: -2px; }
-.mode-btn:disabled, .mode-btn-unavailable { opacity: 0.4; cursor: not-allowed; }
-.mode-btn:disabled.active, .mode-btn-unavailable.active { background: transparent; color: var(--coach-accent); }
+.mode-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.mode-btn:disabled.active { background: transparent; color: var(--coach-accent); }
 
 /* ── 文 documents mode tab shell ─────────────────────────────── */
 

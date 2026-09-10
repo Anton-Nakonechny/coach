@@ -8,7 +8,6 @@
 // yields at its first `await` right after those assignments).
 
 let noamConfig = null;      // {baseUrl, profileId} from GET /api/noam/config, cached once
-let noamAvailable = false;  // true only after a successful availability probe
 
 const NOAM_UNAVAILABLE_TOOLTIP = 'noam no está disponible';
 
@@ -18,21 +17,21 @@ function documentsModeButton() {
 }
 
 function disableDocumentsMode(reason) {
-    noamAvailable = false;
     const btn = documentsModeButton();
-    if (!btn) return;
-    btn.disabled = true;
-    btn.classList.add('mode-btn-unavailable');
-    btn.title = reason;
-    btn.setAttribute('data-tooltip', reason);
+    if (btn) {
+        btn.disabled = true;
+        btn.setAttribute('data-tooltip', reason);
+    }
+    // A slow-but-failing probe can lose a race with the user clicking 文 first:
+    // spanishMode is already 'documents' by the time this runs. Route back to
+    // 語 so the chip reflects a live mode instead of a disabled-and-active 文.
+    if (spanishMode === 'documents') setSpanishMode('language');
 }
 
 function enableDocumentsMode() {
-    noamAvailable = true;
     const btn = documentsModeButton();
     if (!btn) return;
     btn.disabled = false;
-    btn.classList.remove('mode-btn-unavailable');
     btn.removeAttribute('title');
     btn.setAttribute('data-tooltip', GLYPH_LABELS['文']);
 }
@@ -44,7 +43,7 @@ async function probeNoamAvailability() {
         const configResp = await fetch(`${API_URL}/noam/config`);
         if (!configResp.ok) { disableDocumentsMode(NOAM_UNAVAILABLE_TOOLTIP); return; }
         const config = await configResp.json();
-        if (!config || !config.profileId) { disableDocumentsMode(NOAM_UNAVAILABLE_TOOLTIP); return; }
+        if (!config || !config.baseUrl || !config.profileId) { disableDocumentsMode(NOAM_UNAVAILABLE_TOOLTIP); return; }
         noamConfig = config;
 
         const probeResp = await fetch(`${config.baseUrl}/documents?language=es`);

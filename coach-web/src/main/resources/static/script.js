@@ -201,6 +201,11 @@ function hintsFromOpenChat() {
 // (missed-words shortcuts, re-drilling an open 語 chat); 文 always opens the
 // noam documents shell with none of those shortcuts.
 function selectSpanishMode(mode) {
+    // Re-clicking the already-active glyph is a no-op — it must not discard an
+    // open chat via onCoachSelected('spanish') → resetToSetup(). The one
+    // exception: a pending missed-words drill still needs to fire even when its
+    // glyph is already the active mode (e.g. re-clicking 語 after word feedback).
+    if (mode === spanishMode && !(pendingMissedWords && pendingMissedWords.length)) return;
     setCoachRadio('spanish');
     setSpanishMode(mode);
     if (mode === 'documents') {
