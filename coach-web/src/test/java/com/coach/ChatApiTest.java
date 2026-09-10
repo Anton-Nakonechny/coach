@@ -15,6 +15,8 @@ import com.coach.anthropic.UploadedFile;
 import com.coach.config.AppConfig;
 import com.coach.docs.DocFetchGateway;
 import com.coach.store.ConversationStore;
+import com.coach.word.WordPair;
+import com.coach.word.WordSetStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -135,6 +137,9 @@ class ChatApiTest {
 
     @Autowired
     AppConfig appConfig;
+
+    @Autowired
+    WordSetStore wordSetStore;
 
     private final Deque<List<AnthropicBlock>> pendingResponses = new ArrayDeque<>();
     private final List<GatewayCall> gatewayCalls = new ArrayList<>();
@@ -2455,6 +2460,187 @@ class ChatApiTest {
         for (JsonNode r : check.get("results"))
             if (r.get("correct").asBoolean()) correct++;
         assertThat(correct).isEqualTo(2);
+    }
+
+    private ResponseEntity<String> postSeed(Map<String, Object> body) {
+        return rest.postForEntity(url("/api/spanish/words/seed"), body, String.class);
+    }
+
+    @Test
+    void seedMintsSetWithMaskedHintsAndNoLlmCall() {
+        List<Map<String, Object>> items = List.of(
+                Map.of("lexemeId", "lex-1", "spanish", "caber", "english", "to fit"),
+                Map.of("lexemeId", "lex-2", "spanish", "pala", "english", "shovel"),
+                Map.of("lexemeId", "lex-3", "spanish", "cráneo", "english", "skull"));
+
+        var resp = postSeed(Map.of("items", items));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode node = json(resp);
+        assertThat(node.get("setId").asText()).isNotBlank();
+        assertThat(node.get("items")).hasSize(3);
+
+        Map<String, String> expectedSpanish = Map.of(
+                "to fit", "caber",
+                "shovel", "pala",
+                "skull", "cráneo");
+        Map<String, String> expectedHint = Map.of(
+                "to fit", "ca···",
+                "shovel", "p···",
+                "skull", "cr····");
+        node.get("items").forEach(item -> {
+            String eng = item.get("english").asText();
+            assertThat(item.get("spanish").asText()).isEqualTo(expectedSpanish.get(eng));
+            assertThat(item.get("hint").asText()).isEqualTo(expectedHint.get(eng));
+        });
+
+        verifyNoInteractions(gateway);
+    }
+
+    @Test
+    void seededSetIsGradedByCheck() {
+        List<Map<String, Object>> items = List.of(
+                Map.of("lexemeId", "lex-1", "spanish", "caber", "english", "to fit"),
+                Map.of("lexemeId", "lex-2", "spanish", "pala", "english", "shovel"));
+
+        var seedResp = json(postSeed(Map.of("items", items)));
+        String setId = seedResp.get("setId").asText();
+
+        Map<String, String> answerByEnglish = Map.of(
+                "to fit", "caber",   // exact match → correct
+                "shovel", "wrong");  // deliberate miss → incorrect
+        List<String> answers = new ArrayList<>();
+        for (JsonNode item : seedResp.get("items"))
+            answers.add(answerByEnglish.get(item.get("english").asText()));
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", setId);
+        checkBody.put("answers", answers);
+        var results = json(postCheck(checkBody)).get("results");
+
+        assertThat(results).hasSize(2);
+        Map<String, JsonNode> resultByEnglish = new HashMap<>();
+        results.forEach(r -> resultByEnglish.put(r.get("english").asText(), r));
+        assertThat(resultByEnglish.get("to fit").get("correct").asBoolean()).isTrue();
+        assertThat(resultByEnglish.get("to fit").get("fullHint").asBoolean()).isFalse();
+        assertThat(resultByEnglish.get("shovel").get("correct").asBoolean()).isFalse();
+    }
+
+    @Test
+    void seedRejectsEmptyList() {
+        var resp = postSeed(Map.of("items", List.of()));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void seedStoresLexemeIdAlignedWithShuffledResponse() {
+        List<Map<String, Object>> items = List.of(
+                Map.of("lexemeId", "lex-1", "spanish", "caber", "english", "to fit"),
+                Map.of("lexemeId", "lex-2", "spanish", "pala", "english", "shovel"),
+                Map.of("lexemeId", "lex-3", "spanish", "cráneo", "english", "skull"));
+        Map<String, String> lexemeIdBySpanish = Map.of(
+                "caber", "lex-1",
+                "pala", "lex-2",
+                "cráneo", "lex-3");
+
+        var seedResp = json(postSeed(Map.of("items", items)));
+        String setId = seedResp.get("setId").asText();
+        JsonNode respItems = seedResp.get("items");
+
+        // take() is single-use — this must be the only call against this setId.
+        List<WordPair> stored = wordSetStore.take(setId).orElseThrow();
+
+        assertThat(stored).hasSize(respItems.size());
+        for (int i = 0; i < stored.size(); i++) {
+            String spanish = respItems.get(i).get("spanish").asText();
+            assertThat(stored.get(i).spanishOriginal()).isEqualTo(spanish);
+            assertThat(stored.get(i).lexemeId()).isEqualTo(lexemeIdBySpanish.get(spanish));
+        }
+    }
+
+    @Test
+    void seedRejectsBlankSpanish() {
+        var resp = postSeed(Map.of("items", List.of(Map.of("spanish", "", "english", "to fit"))));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void seedRejectsBlankEnglish() {
+        var resp = postSeed(Map.of("items", List.of(Map.of("spanish", "caber", "english", ""))));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void seedRejectsAbsentItems() {
+        var resp = postSeed(Map.of());
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void seedAllowsBlankLexemeId() {
+        var resp = postSeed(Map.of("items",
+                List.of(Map.of("spanish", "caber", "english", "to fit", "lexemeId", ""))));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void seedAllowsAbsentLexemeId() {
+        var resp = postSeed(Map.of("items", List.of(Map.of("spanish", "caber", "english", "to fit"))));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void seedRejectsNullItem() {
+        Map<String, Object> body = new HashMap<>();
+        List<Object> items = new ArrayList<>();
+        items.add(null);
+        body.put("items", items);
+
+        var resp = postSeed(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).isNotBlank();
+    }
+
+    @Test
+    void seedShufflesResponseOrder() {
+        List<Map<String, Object>> items = new ArrayList<>();
+        List<String> original = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            // Letters only: stripEdges (finding 6) trims trailing digits, which would
+            // otherwise collapse "es0".."es11" down to the same word "es".
+            String suffix = String.valueOf((char) ('a' + i));
+            items.add(Map.of("spanish", "es" + suffix, "english", "en" + suffix));
+            original.add("es" + suffix);
+        }
+
+        var seedResp = json(postSeed(Map.of("items", items)));
+        List<String> returned = new ArrayList<>();
+        for (JsonNode item : seedResp.get("items"))
+            returned.add(item.get("spanish").asText());
+
+        assertThat(returned).containsExactlyInAnyOrderElementsOf(original);
+        assertThat(returned).isNotEqualTo(original);
+    }
+
+    @Test
+    void seedStripsEdgePunctuationFromSpanish() {
+        var seedResp = json(postSeed(Map.of("items",
+                List.of(Map.of("spanish", "(caber)", "english", "to fit")))));
+
+        JsonNode item = seedResp.get("items").get(0);
+        assertThat(item.get("spanish").asText()).isEqualTo("caber");
+        assertThat(item.get("hint").asText()).isEqualTo("ca···");
     }
 
     @Test
