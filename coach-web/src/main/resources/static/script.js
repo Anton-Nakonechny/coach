@@ -12,7 +12,7 @@ let models = [];
 let effortLevels = [];
 let pendingAttachments = []; // [{id, file, kind, objectUrl?}]
 let conversationCoach = {};  // conversationId -> coachType slug ('none' for plain chats)
-let activeSetup = null;   // null | 'spanish' | 'spanish-words' | 'claude-architect'
+let activeSetup = null;   // null | 'spanish' | 'spanish-words' | 'claude-architect' | 'noam'
 let selectedTopic = null;
 let spanishTopics = null;
 let certTopics = null;
@@ -22,7 +22,7 @@ let pendingMissedWords = null; // word list string for "practice missed" flow
 const SPANISH_WELCOME = 'Nuevo chat. Elige un modelo a la izquierda y un tema abajo, e introduce una lista de palabras para practicar.';
 const CLAUDE_WELCOME = 'New chat. Pick a topic below — I will quiz you with exam-style multiple-choice questions and explain every answer.';
 const NEXT_QUESTION = 'Next question.';
-const GLYPH_LABELS = { '語': 'language mode', '字': 'words mode' };
+const GLYPH_LABELS = { '語': 'language mode', '字': 'words mode', '文': 'documents mode' };
 
 marked.use({ renderer: { link(token) {
     const html = marked.Renderer.prototype.link.call(this, token);
@@ -132,8 +132,11 @@ function setupEventListeners() {
     // Crossing the breakpoint (rotation, resize) clears drawer state so the
     // desktop layout never inherits a stale .open class or visible backdrop.
     mobileQuery.addEventListener('change', (e) => { if (!e.matches) closeDrawers(); });
-    // 語/字 mode toggle — a click anywhere on the chip flips between the two modes
-    spanishModeToggle.addEventListener('click', switchSpanishMode);
+    // 語/字/文 mode toggle — each glyph button selects its own mode directly
+    spanishModeToggle.addEventListener('click', (e) => {
+        const mode = e.target.dataset.mode;
+        if (mode) selectSpanishMode(mode);
+    });
     sidebarCollapse.addEventListener('click', () => togglePanelCollapsed('sidebar'));
     sidebarRestore.addEventListener('click', () => togglePanelCollapsed('sidebar'));
     coachCollapse.addEventListener('click', () => togglePanelCollapsed('coach'));
@@ -177,9 +180,9 @@ function setSpanishMode(mode) {
     });
 }
 
-// Flip 語↔字. Clicking the chip also selects the Español coach. Right after word
-// feedback, the flip re-drills the missed words — into 語 sentence practice or a fresh
-// 字 quiz — the same outcome as the two in-dialog buttons.
+// Selecting any glyph also selects the Español coach. Right after word feedback,
+// choosing 語/字 re-drills the missed words — into sentence practice or a fresh
+// quiz — the same outcome as the two in-dialog buttons.
 function hintsFromOpenChat() {
     const blocks = chatMessages.querySelectorAll('.sentence-cards');
     if (!blocks.length) return [];
@@ -194,16 +197,27 @@ function hintsFromOpenChat() {
     return words;
 }
 
-function switchSpanishMode() {
+// Per-glyph dispatch: 語/字 keep every side-effect the old flip handler had
+// (missed-words shortcuts, re-drilling an open 語 chat); 文 always opens the
+// noam documents shell with none of those shortcuts.
+function selectSpanishMode(mode) {
+    // Re-clicking the already-active glyph is a no-op — it must not discard an
+    // open chat via onCoachSelected('spanish') → resetToSetup(). The one
+    // exception: a pending missed-words drill still needs to fire even when its
+    // glyph is already the active mode (e.g. re-clicking 語 after word feedback).
+    if (mode === spanishMode && !(pendingMissedWords && pendingMissedWords.length)) return;
     setCoachRadio('spanish');
-    const next = spanishMode === 'words' ? 'language' : 'words';
-    setSpanishMode(next);
+    setSpanishMode(mode);
+    if (mode === 'documents') {
+        enterNoamSetup();
+        return;
+    }
     if (pendingMissedWords && pendingMissedWords.length) {
-        if (next === 'language') practiceMissed(pendingMissedWords);
+        if (mode === 'language') practiceMissed(pendingMissedWords);
         else retryMissedInWords(pendingMissedWords);
         return;
     }
-    const hints = next === 'words' ? hintsFromOpenChat() : [];
+    const hints = mode === 'words' ? hintsFromOpenChat() : [];
     if (hints.length) retryMissedInWords(hints);
     else onCoachSelected('spanish');
 }
@@ -258,6 +272,8 @@ async function onCoachSelected(value) {
     if (value === 'spanish') {
         if (spanishMode === 'words') {
             enterWordsSetup();
+        } else if (spanishMode === 'documents') {
+            enterNoamSetup();
         } else {
             enterSpanishSetup();
         }
@@ -692,6 +708,10 @@ async function sendMessage() {
     }
     if (activeSetup === 'spanish-words') {
         translateWords(message);
+        return;
+    }
+    if (activeSetup === 'noam') {
+        composerError.textContent = 'Elige un documento primero';
         return;
     }
 
