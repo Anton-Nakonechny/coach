@@ -293,7 +293,10 @@ let noamStudyState = null;   // {loadPage, offset, exhausted, loading, paging} f
 function openStudyItems(documentId, title) {
     renderNoamItemList(document.getElementById('noamPanel'), {
         title,
-        onBack: () => renderDocumentosTab(document.getElementById('noamPanel')),
+        onBack: () => {
+            flushStudyMarksInBackground();
+            renderDocumentosTab(document.getElementById('noamPanel'));
+        },
         paging: true,
         loadPage: (offset) => fetchDocumentStudyItems(documentId, offset),
     });
@@ -408,7 +411,7 @@ async function loadNextStudyPage(list) {
         const wrap = document.createElement('div');
         wrap.className = 'noam-error';
         const msg = document.createElement('p');
-        msg.textContent = err.message || 'No se pudieron cargar las palabras.';
+        msg.textContent = err.message ? humanizeNoamError(err) : 'No se pudieron cargar las palabras.';
         const retry = document.createElement('button');
         retry.type = 'button';
         retry.className = 'topic-button';
@@ -501,14 +504,9 @@ async function proceedStudyItems(proceedBtn, errorEl, list) {
     errorEl.hidden = true;
     errorEl.innerHTML = '';
 
-    const known = [];
-    const ignored = [];
+    const { known, ignored } = pendingStudyMarks();
     const checkedItems = [];
-    noamStudyEntries.forEach(entry => {
-        if (entry.mark === 'KNOWN') known.push(entry.item.lexemeId);
-        else if (entry.mark === 'IGNORED') ignored.push(entry.item.lexemeId);
-        if (entry.checked) checkedItems.push(entry.item);
-    });
+    noamStudyEntries.forEach(entry => { if (entry.checked) checkedItems.push(entry.item); });
 
     if (known.length === 0 && ignored.length === 0 && checkedItems.length === 0) return;
 
@@ -517,10 +515,13 @@ async function proceedStudyItems(proceedBtn, errorEl, list) {
         if (known.length > 0) await postNoamLexemeStates(known, 'KNOWN');
         if (ignored.length > 0) await postNoamLexemeStates(ignored, 'IGNORED');
     } catch (err) {
-        proceedBtn.disabled = false;
-        showStudyListError(errorEl, err.message || 'No se pudo guardar la marca.',
+        showStudyListError(errorEl, humanizeNoamError(err),
             () => proceedStudyItems(proceedBtn, errorEl, list));
         return;
+    } finally {
+        // Restored on every exit, the quiz hand-off included: the stub (and later a
+        // throwing T10) would otherwise leave Continuar dead with the list still up.
+        proceedBtn.disabled = false;
     }
 
     noamStudyEntries.forEach((entry, lexemeId) => {
@@ -531,12 +532,35 @@ async function proceedStudyItems(proceedBtn, errorEl, list) {
     });
 
     if (checkedItems.length === 0) {
-        proceedBtn.disabled = false;
         updateStudyEmptyState(list);
+        // Removing rows can leave the list too short to scroll, and the scroll is the
+        // only thing that ever asks for another page — so top it up from here instead.
+        loadNextStudyPage(list);
         return;
     }
 
     startWordQuizFromNoam(checkedItems);
+}
+
+// The marks waiting to be flushed, split by state. Shared by Proceed (which awaits
+// them and only then drops the rows) and Back (which fires them off and leaves).
+function pendingStudyMarks() {
+    const known = [];
+    const ignored = [];
+    noamStudyEntries.forEach(entry => {
+        if (entry.mark === 'KNOWN') known.push(entry.item.lexemeId);
+        else if (entry.mark === 'IGNORED') ignored.push(entry.item.lexemeId);
+    });
+    return { known, ignored };
+}
+
+// Leaving the list must not block on the network, so the flush goes out unawaited:
+// navigation stays instant at the cost of losing the marks if the POST fails.
+function flushStudyMarksInBackground() {
+    if (!noamStudyEntries) return;
+    const { known, ignored } = pendingStudyMarks();
+    if (known.length > 0) postNoamLexemeStates(known, 'KNOWN').catch(() => {});
+    if (ignored.length > 0) postNoamLexemeStates(ignored, 'IGNORED').catch(() => {});
 }
 
 async function postNoamLexemeStates(lexemeIds, state) {
@@ -688,6 +712,7 @@ async function performNoamUpload(file, title, { onError } = {}) {
 function humanizeNoamError(error) {
     const raw = error?.message || String(error);
     if (raw === 'Failed to fetch') return 'No se pudo conectar con noam. Comprueba tu conexión e inténtalo de nuevo.';
+    if (/^HTTP \d+$/.test(raw)) return `noam devolvió un error (${raw}).`;
     return raw;
 }
 
