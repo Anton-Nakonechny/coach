@@ -643,15 +643,24 @@ async function startWordQuizFromNoam(items) {
     }
 }
 
+// Mirrors Text.stripEdges (coach-core): trims leading/trailing non-letter characters
+// so a request's spanish matches the /seed response's edge-stripped value.
+function stripEdges(s) {
+    return s.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+}
+
 // The /seed response edge-strips each spanish value (Text.stripEdges), so it can
 // differ from the raw noam displayText sent in. Key the cache by the RESPONSE's
 // spanish — that's also what /check later echoes back in results[].spanish — and
-// recover the matching lexemeId via the (unmodified) english field.
+// recover the matching lexemeId via the (locally edge-stripped) request spanish.
+// Keying by spanish rather than english matters: two study items routinely share an
+// english gloss (saber/conocer → "to know"), and a plain Map keyed by english would
+// collapse them, silently reporting both duplicate-gloss words' grades to one lexeme.
 function cacheNoamWordSource(requestItems, responseItems) {
-    const byEnglish = new Map(requestItems.map(it => [it.english, it]));
+    const bySpanish = new Map(requestItems.map(it => [stripEdges(it.spanish), it]));
     noamWordSource = new Map();
     responseItems.forEach(respItem => {
-        const src = byEnglish.get(respItem.english);
+        const src = bySpanish.get(respItem.spanish);
         if (src) noamWordSource.set(respItem.spanish, { lexemeId: src.lexemeId, spanish: respItem.spanish, english: respItem.english });
     });
 }
