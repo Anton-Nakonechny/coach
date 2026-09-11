@@ -12,6 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Ensure local application.yml exists
+        run: |
+          [ -f coach-web/src/main/resources/application.yml ] || \
+            cp coach-web/src/main/resources/application.yml.example coach-web/src/main/resources/application.yml
       - uses: actions/setup-java@v5
         with:
           java-version: '21'
@@ -24,6 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Ensure local application.yml exists
+        run: |
+          [ -f coach-web/src/main/resources/application.yml ] || \
+            cp coach-web/src/main/resources/application.yml.example coach-web/src/main/resources/application.yml
       - uses: actions/setup-java@v5
         with:
           java-version: '21'
