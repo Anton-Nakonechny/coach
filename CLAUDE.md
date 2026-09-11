@@ -50,6 +50,14 @@ environment variables and system properties still take precedence over the file.
 `ApiKeyStartupCheck` logs a startup warning when no key is present (the UI and
 `/api/models` still work; only `/api/chat` needs one).
 
+Never commit `coach-web/src/main/resources/application.yml` either — it's
+gitignored so a developer's real `coach.noam.base-url` (e.g. a LAN address/hostname
+when noam runs on another machine) never reaches the public repo. Use
+`application.yml.example` (same directory) as the committed template: copy it to
+`application.yml` before running coach-web, then edit `coach.noam.base-url`
+locally. `coach.noam.profile-id`/`user-id` can stay as the example's placeholder
+UUIDs unless your local noam instance requires real ones.
+
 ## Architecture
 
 ### Modules

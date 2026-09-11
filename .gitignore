@@ -2,6 +2,7 @@ target/
 conversations/
 .env
 .env.key
+coach-web/src/main/resources/application.yml
 *.log
 .md/
 .DS_Store
