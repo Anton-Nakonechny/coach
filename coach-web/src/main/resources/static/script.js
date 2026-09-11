@@ -1337,6 +1337,10 @@ async function openConversation(conversationId) {
         messages.forEach(m => addMessage(m.content, m.role, m.attachments, m.sentences, m.question));
         highlightActiveConversation();
         setCoachRadio(conversationCoach[conversationId] || 'none');
+        // Words/documents modes are client-only overlays on top of a persisted
+        // 語 chat — no stored conversation is ever "in" 字 or 文. Reset the
+        // glyph so it doesn't keep showing whatever mode was active before.
+        setSpanishMode('language');
         activateQuiz();
     } catch (e) {
         console.error(e);
