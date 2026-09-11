@@ -1,9 +1,19 @@
 const { test, expect } = require('@playwright/test');
 const { MODELS_RESPONSE } = require('./fixtures');
 
+const NOAM_BASE = 'http://noam.test';
+
 test('opening an Español conversation from history resets the glyph to 語', async ({ page }) => {
     await page.route('**/api/models', route =>
         route.fulfill({ contentType: 'application/json', body: JSON.stringify(MODELS_RESPONSE) })
+    );
+    // The 文 button starts disabled until probeNoamAvailability() resolves; stub
+    // both calls it makes so the probe succeeds and the button is clickable.
+    await page.route('**/api/noam/config', route =>
+        route.fulfill({ contentType: 'application/json', body: JSON.stringify({ baseUrl: NOAM_BASE, profileId: 'p1' }) })
+    );
+    await page.route(`${NOAM_BASE}/documents?language=es`, route =>
+        route.fulfill({ contentType: 'application/json', body: JSON.stringify([]) })
     );
     await page.route('**/api/conversations', route =>
         route.fulfill({
