@@ -110,3 +110,23 @@ test('going back flushes marks instead of dropping them', async ({ page }) => {
     await expect(page.locator('.noam-doc-row')).toBeVisible();
     await expect.poll(() => flushed).toEqual([{ lexemeIds: ['lex-0'], state: 'KNOWN' }]);
 });
+
+// The Documentos/Cola tab buttons stay clickable while a study list is open and,
+// unlike Back, don't go through onBack — activateNoamTab has to flush on their
+// behalf or a tab switch silently drops the same marks Back already protects.
+test('switching tabs flushes marks instead of dropping them', async ({ page }) => {
+    const flushed = [];
+    await routeNoam(page, {
+        pages: { 0: studyItems(3) },
+        onLexemeStates: async route => {
+            flushed.push(JSON.parse(route.request().postData()));
+            await route.fulfill({ status: 204, body: '' });
+        },
+    });
+    await openDocument(page);
+
+    await page.locator('.noam-study-row').first().locator('.noam-mark-known').click();
+    await page.click('.noam-tab[data-tab="cola"]');
+
+    await expect.poll(() => flushed).toEqual([{ lexemeIds: ['lex-0'], state: 'KNOWN' }]);
+});

@@ -116,9 +116,12 @@ let noamUploadInFlight = false; // holds the upload modal open while its POST is
 
 // Tab-switch dispatcher: called both on first entering the noam shell and on every
 // Documentos/Cola click. Closes any open upload modal so switching tabs never leaves
-// one stranded, then rebuilds the panel for the newly active tab.
+// one stranded, flushes any pending study-list marks so switching tabs can't silently
+// drop triage the same way Back already guards against, then rebuilds the panel for
+// the newly active tab.
 function activateNoamTab(tabId, panel) {
     closeUploadModal();
+    flushStudyMarksInBackground();
     if (tabId === 'documentos') {
         renderDocumentosTab(panel);
     } else {
@@ -555,12 +558,15 @@ function pendingStudyMarks() {
 }
 
 // Leaving the list must not block on the network, so the flush goes out unawaited:
-// navigation stays instant at the cost of losing the marks if the POST fails.
+// navigation stays instant at the cost of losing the marks if the POST fails. Clearing
+// noamStudyEntries afterwards makes this idempotent: activateNoamTab now calls it on
+// every tab switch, and a stale list from a prior visit must not get re-flushed each time.
 function flushStudyMarksInBackground() {
     if (!noamStudyEntries) return;
     const { known, ignored } = pendingStudyMarks();
     if (known.length > 0) postNoamLexemeStates(known, 'KNOWN').catch(() => {});
     if (ignored.length > 0) postNoamLexemeStates(ignored, 'IGNORED').catch(() => {});
+    noamStudyEntries = null;
 }
 
 async function postNoamLexemeStates(lexemeIds, state) {
