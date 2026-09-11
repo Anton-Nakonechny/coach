@@ -619,6 +619,17 @@ header { display: none; }
 
 .noam-error { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; padding: 0.75rem 0; color: var(--text-secondary); font-size: 0.85rem; }
 
+/* ── T09: study-item list ────────────────────────────────────────────── */
+.noam-study-header { display: flex; align-items: center; gap: 0.5rem; }
+.noam-study-title { font-size: 0.95rem; font-weight: 600; color: var(--text-primary); word-break: break-word; }
+.noam-study-toolbar { margin: 0.5rem 0; }
+.noam-study-list { display: flex; flex-direction: column; gap: 0.4rem; max-height: 50vh; overflow-y: auto; margin-bottom: 0.5rem; }
+.noam-study-spanish { flex: 1; font-weight: 600; color: var(--text-primary); }
+.noam-mark-btn { flex-shrink: 0; }
+.noam-mark-known.active { border-color: #2e7d32; color: #2e7d32; }
+.noam-mark-ignore.active { border-color: var(--text-secondary); color: var(--text-secondary); background: var(--surface-hover); }
+.noam-study-proceed { align-self: flex-start; }
+
 /* ── Upload modal ────────────────────────────────────────────────────── */
 .noam-modal-backdrop {
     position: fixed;

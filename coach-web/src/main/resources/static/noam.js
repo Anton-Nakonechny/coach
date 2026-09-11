@@ -116,9 +116,12 @@ let noamUploadInFlight = false; // holds the upload modal open while its POST is
 
 // Tab-switch dispatcher: called both on first entering the noam shell and on every
 // Documentos/Cola click. Closes any open upload modal so switching tabs never leaves
-// one stranded, then rebuilds the panel for the newly active tab.
+// one stranded, flushes any pending study-list marks so switching tabs can't silently
+// drop triage the same way Back already guards against, then rebuilds the panel for
+// the newly active tab.
 function activateNoamTab(tabId, panel) {
     closeUploadModal();
+    flushStudyMarksInBackground();
     if (tabId === 'documentos') {
         renderDocumentosTab(panel);
     } else {
@@ -280,10 +283,321 @@ function formatNoamDate(iso) {
     return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
-// Stub — T09 implements the actual study-item list. Wiring (which row calls this,
-// with which arguments) is complete as of T07.
+// ── T09: Study-item list (triage a document's unknown words) ─────
+// Shared list component: renders checkbox/conocida/ignorar rows into #noamPanel
+// and owns the Proceed flow. Paging belongs to the caller via `loadPage` — T08's
+// Cola tab has no offset, so it reuses this with paging:false.
+
+const NOAM_STUDY_LIMIT = 50;
+
+let noamStudyEntries = null; // Map<lexemeId, {item, checked, mark, rowEl, checkboxEl, knownBtn, ignoreBtn}>
+let noamStudyState = null;   // {loadPage, offset, exhausted, loading, paging} for the open list, or null
+
 function openStudyItems(documentId, title) {
-    console.log(`openStudyItems stub: documentId=${documentId} title=${JSON.stringify(title)}`);
+    renderNoamItemList(document.getElementById('noamPanel'), {
+        title,
+        onBack: () => {
+            flushStudyMarksInBackground();
+            renderDocumentosTab(document.getElementById('noamPanel'));
+        },
+        paging: true,
+        loadPage: (offset) => fetchDocumentStudyItems(documentId, offset),
+    });
+}
+
+// Normalises noam's StudyItem shape into the {lexemeId, spanish, english} triple
+// the row renderer, the marks flush and the 字 quiz hand-off all share.
+async function fetchDocumentStudyItems(documentId, offset) {
+    await noamProbe;
+    if (!noamConfig || !noamConfig.baseUrl) throw new Error('noam no está disponible.');
+    const url = `${noamConfig.baseUrl}/documents/${documentId}/study-items` +
+        `?profileId=${noamConfig.profileId}&limit=${NOAM_STUDY_LIMIT}&offset=${offset}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    return items.map(it => ({ lexemeId: it.lexeme.id, spanish: it.lexeme.displayText, english: it.translation }));
+}
+
+function renderNoamItemList(panel, { title, onBack, loadPage, paging }) {
+    panel.innerHTML = '';
+    noamStudyEntries = new Map();
+    noamStudyState = { loadPage, offset: 0, exhausted: false, loading: false, paging: !!paging };
+
+    const header = document.createElement('div');
+    header.className = 'noam-study-header';
+    const backBtn = document.createElement('button');
+    backBtn.type = 'button';
+    backBtn.className = 'icon-button noam-study-back';
+    backBtn.setAttribute('aria-label', 'Volver');
+    backBtn.textContent = '←';
+    backBtn.addEventListener('click', onBack);
+    const heading = document.createElement('h3');
+    heading.className = 'noam-study-title';
+    heading.textContent = title || '';
+    header.appendChild(backBtn);
+    header.appendChild(heading);
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'noam-study-toolbar';
+    const selectAllBtn = document.createElement('button');
+    selectAllBtn.type = 'button';
+    selectAllBtn.className = 'topic-button';
+    selectAllBtn.textContent = 'Seleccionar todo';
+    // A one-shot "check every untriaged row" action rather than a synced tri-state
+    // checkbox — simpler, and marked rows are deliberately left alone so a mark
+    // decision already made isn't silently overridden.
+    selectAllBtn.addEventListener('click', () => {
+        noamStudyEntries.forEach(entry => {
+            if (entry.mark) return;
+            entry.checked = true;
+            entry.checkboxEl.checked = true;
+        });
+    });
+    toolbar.appendChild(selectAllBtn);
+
+    const list = document.createElement('div');
+    list.className = 'noam-study-list';
+
+    const errorEl = document.createElement('div');
+    errorEl.className = 'noam-inline-error';
+    errorEl.hidden = true;
+
+    const proceedBtn = document.createElement('button');
+    proceedBtn.type = 'button';
+    proceedBtn.className = 'topic-button noam-study-proceed';
+    proceedBtn.textContent = 'Continuar';
+    proceedBtn.addEventListener('click', () => proceedStudyItems(proceedBtn, errorEl, list));
+
+    panel.appendChild(header);
+    panel.appendChild(toolbar);
+    panel.appendChild(list);
+    panel.appendChild(errorEl);
+    panel.appendChild(proceedBtn);
+
+    if (paging) {
+        list.addEventListener('scroll', () => {
+            if (list.scrollTop + list.clientHeight >= list.scrollHeight - 80) loadNextStudyPage(list);
+        });
+    }
+
+    loadNextStudyPage(list);
+}
+
+// Fetches the next page and appends its rows. Serves the very first page too
+// (offset starts at 0), so both the paging (documents) and single-shot (queue)
+// callers drive through the same path. `state !== noamStudyState` after an await
+// means renderNoamItemList ran again in the meantime (a different document, or a
+// tab switch that goes through it) — the fetch landed for a list nobody shows
+// any more, so its result must not touch the current DOM.
+async function loadNextStudyPage(list) {
+    const state = noamStudyState;
+    if (!state || state.loading || state.exhausted) return;
+    state.loading = true;
+    if (state.offset === 0) list.innerHTML = '<p class="muted">Cargando palabras…</p>';
+    try {
+        const items = await state.loadPage(state.offset);
+        if (state !== noamStudyState) return;
+        if (state.offset === 0) list.innerHTML = '';
+        items.forEach(item => addStudyRow(list, item));
+        state.offset += items.length;
+        if (!state.paging || items.length < NOAM_STUDY_LIMIT) state.exhausted = true;
+        updateStudyEmptyState(list);
+    } catch (err) {
+        if (state !== noamStudyState) return;
+        // Stops automatic (scroll-triggered) retries; the button below retries
+        // explicitly. On a first-page failure this replaces the "Cargando…"
+        // placeholder; on a later page it's appended below the rows already
+        // loaded, so a mid-scroll blip never wipes what's already on screen.
+        state.exhausted = true;
+        if (state.offset === 0) list.innerHTML = '';
+        const wrap = document.createElement('div');
+        wrap.className = 'noam-error';
+        const msg = document.createElement('p');
+        msg.textContent = err.message ? humanizeNoamError(err) : 'No se pudieron cargar las palabras.';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'topic-button';
+        retry.addEventListener('click', () => { wrap.remove(); state.exhausted = false; loadNextStudyPage(list); });
+        retry.textContent = 'Reintentar';
+        wrap.appendChild(msg);
+        wrap.appendChild(retry);
+        list.appendChild(wrap);
+    } finally {
+        state.loading = false;
+    }
+}
+
+// Keeps the "no words" placeholder in sync with `noamStudyEntries`: removes any
+// stale one before deciding whether to show a fresh one, so it can never linger
+// after Proceed empties the list and a later page then repopulates it.
+function updateStudyEmptyState(list) {
+    const existing = list.querySelector('.noam-study-empty');
+    if (existing) existing.remove();
+    if (noamStudyEntries.size === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'muted noam-study-empty';
+        empty.textContent = 'No hay palabras nuevas.';
+        list.appendChild(empty);
+    }
+}
+
+function addStudyRow(list, item) {
+    const row = document.createElement('div');
+    row.className = 'word-row noam-study-row';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'noam-study-check';
+    checkbox.setAttribute('aria-label', `Estudiar ${item.spanish}`);
+
+    const spanish = document.createElement('span');
+    spanish.className = 'noam-study-spanish';
+    spanish.textContent = item.spanish;
+
+    const english = document.createElement('span');
+    english.className = 'word-english';
+    english.textContent = item.english;
+
+    const knownBtn = document.createElement('button');
+    knownBtn.type = 'button';
+    knownBtn.className = 'topic-button noam-mark-btn noam-mark-known';
+    knownBtn.textContent = 'conocida';
+
+    const ignoreBtn = document.createElement('button');
+    ignoreBtn.type = 'button';
+    ignoreBtn.className = 'topic-button noam-mark-btn noam-mark-ignore';
+    ignoreBtn.textContent = 'ignorar';
+
+    const entry = { item, checked: false, mark: null, rowEl: row, checkboxEl: checkbox, knownBtn, ignoreBtn };
+
+    // The checkbox and the marks contradict each other: checking it after a mark
+    // clears the mark, and marking (below) unchecks the box.
+    checkbox.addEventListener('change', () => {
+        entry.checked = checkbox.checked;
+        if (entry.checked && entry.mark) setStudyMark(entry, null);
+    });
+    knownBtn.addEventListener('click', () => setStudyMark(entry, entry.mark === 'KNOWN' ? null : 'KNOWN'));
+    ignoreBtn.addEventListener('click', () => setStudyMark(entry, entry.mark === 'IGNORED' ? null : 'IGNORED'));
+
+    row.appendChild(checkbox);
+    row.appendChild(spanish);
+    row.appendChild(english);
+    row.appendChild(knownBtn);
+    row.appendChild(ignoreBtn);
+    list.appendChild(row);
+
+    noamStudyEntries.set(item.lexemeId, entry);
+}
+
+function setStudyMark(entry, mark) {
+    entry.mark = mark;
+    entry.knownBtn.classList.toggle('active', mark === 'KNOWN');
+    entry.ignoreBtn.classList.toggle('active', mark === 'IGNORED');
+    if (mark) {
+        entry.checked = false;
+        entry.checkboxEl.checked = false;
+    }
+}
+
+// Proceed: flush marks first (so a 502 never silently drops triage), then hand the
+// checked items to the 字 quiz. Marks stay in `noamStudyEntries` until the flush
+// actually succeeds, so re-clicking after a failure retries the same payload.
+async function proceedStudyItems(proceedBtn, errorEl, list) {
+    errorEl.hidden = true;
+    errorEl.innerHTML = '';
+
+    const { known, ignored } = pendingStudyMarks();
+    const checkedItems = [];
+    noamStudyEntries.forEach(entry => { if (entry.checked) checkedItems.push(entry.item); });
+
+    if (known.length === 0 && ignored.length === 0 && checkedItems.length === 0) return;
+
+    proceedBtn.disabled = true;
+    try {
+        if (known.length > 0) await postNoamLexemeStates(known, 'KNOWN');
+        if (ignored.length > 0) await postNoamLexemeStates(ignored, 'IGNORED');
+    } catch (err) {
+        showStudyListError(errorEl, humanizeNoamError(err),
+            () => proceedStudyItems(proceedBtn, errorEl, list));
+        return;
+    } finally {
+        // Restored on every exit, the quiz hand-off included: the stub (and later a
+        // throwing T10) would otherwise leave Continuar dead with the list still up.
+        proceedBtn.disabled = false;
+    }
+
+    noamStudyEntries.forEach((entry, lexemeId) => {
+        if (entry.mark) {
+            entry.rowEl.remove();
+            noamStudyEntries.delete(lexemeId);
+        }
+    });
+
+    if (checkedItems.length === 0) {
+        updateStudyEmptyState(list);
+        // Removing rows can leave the list too short to scroll, and the scroll is the
+        // only thing that ever asks for another page — so top it up from here instead.
+        loadNextStudyPage(list);
+        return;
+    }
+
+    startWordQuizFromNoam(checkedItems);
+}
+
+// The marks waiting to be flushed, split by state. Shared by Proceed (which awaits
+// them and only then drops the rows) and Back (which fires them off and leaves).
+function pendingStudyMarks() {
+    const known = [];
+    const ignored = [];
+    noamStudyEntries.forEach(entry => {
+        if (entry.mark === 'KNOWN') known.push(entry.item.lexemeId);
+        else if (entry.mark === 'IGNORED') ignored.push(entry.item.lexemeId);
+    });
+    return { known, ignored };
+}
+
+// Leaving the list must not block on the network, so the flush goes out unawaited:
+// navigation stays instant at the cost of losing the marks if the POST fails. Clearing
+// noamStudyEntries afterwards makes this idempotent: activateNoamTab now calls it on
+// every tab switch, and a stale list from a prior visit must not get re-flushed each time.
+function flushStudyMarksInBackground() {
+    if (!noamStudyEntries) return;
+    const { known, ignored } = pendingStudyMarks();
+    if (known.length > 0) postNoamLexemeStates(known, 'KNOWN').catch(() => {});
+    if (ignored.length > 0) postNoamLexemeStates(ignored, 'IGNORED').catch(() => {});
+    noamStudyEntries = null;
+}
+
+async function postNoamLexemeStates(lexemeIds, state) {
+    const resp = await fetch(`${API_URL}/noam/lexeme-states`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lexemeIds, state }),
+    });
+    if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.message || `Error al guardar (HTTP ${resp.status})`);
+    }
+}
+
+function showStudyListError(errorEl, message, onRetry) {
+    errorEl.innerHTML = '';
+    errorEl.hidden = false;
+    const p = document.createElement('p');
+    p.textContent = message;
+    errorEl.appendChild(p);
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'topic-button';
+    retry.textContent = 'Reintentar';
+    retry.addEventListener('click', onRetry);
+    errorEl.appendChild(retry);
+}
+
+// Stub — T10 implements the actual noam-seeded 字 quiz.
+function startWordQuizFromNoam(items) {
+    console.log(`startWordQuizFromNoam stub: ${items.length} item(s)`);
 }
 
 // ── Drag-and-drop onto the grid ───────────────────────────────
@@ -404,6 +718,7 @@ async function performNoamUpload(file, title, { onError } = {}) {
 function humanizeNoamError(error) {
     const raw = error?.message || String(error);
     if (raw === 'Failed to fetch') return 'No se pudo conectar con noam. Comprueba tu conexión e inténtalo de nuevo.';
+    if (/^HTTP \d+$/.test(raw)) return `noam devolvió un error (${raw}).`;
     return raw;
 }
 
