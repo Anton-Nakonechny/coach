@@ -17,7 +17,7 @@ function studyItems(count, startIndex = 0) {
 // the config probe, the availability probe + Documentos grid, and the paged
 // study-items endpoint. `pages` is consulted per offset so a test can hand out
 // a full page first and a short page second.
-async function routeNoam(page, { pages, onLexemeStates, studyItemsHandler, onOffset } = {}) {
+async function routeNoam(page, { pages, onLexemeStates, studyItemsHandler, onOffset, onSeed } = {}) {
     await page.route('**/api/models', route =>
         route.fulfill({ contentType: 'application/json', body: JSON.stringify(MODELS_RESPONSE) }));
     await page.route('**/api/conversations', route =>
@@ -39,6 +39,16 @@ async function routeNoam(page, { pages, onLexemeStates, studyItemsHandler, onOff
         if (onLexemeStates) return onLexemeStates(route);
         await route.fulfill({ status: 204, body: '' });
     });
+    // T10 hands checked study items to POST /api/spanish/words/seed to mint the 字
+    // quiz; without a stub here the test hits the real (unmocked) webServer.
+    await page.route('**/api/spanish/words/seed', async route => {
+        if (onSeed) return onSeed(route);
+        const { items } = JSON.parse(route.request().postData());
+        await route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+            setId: 'set-1',
+            items: items.map(it => ({ english: it.english, hint: it.spanish[0], spanish: it.spanish })),
+        }) });
+    });
 }
 
 async function openDocument(page) {
@@ -49,14 +59,14 @@ async function openDocument(page) {
     await expect(page.locator('.noam-study-row').first()).toBeVisible();
 }
 
-test('Continuar stays clickable after handing checked items to the quiz', async ({ page }) => {
+test('Continuar hands checked items off to the 字 quiz', async ({ page }) => {
     await routeNoam(page, { pages: { 0: studyItems(3) } });
     await openDocument(page);
 
     await page.locator('.noam-study-row').first().locator('.noam-study-check').check();
     await page.click('.noam-study-proceed');
 
-    await expect(page.locator('.noam-study-proceed')).toBeEnabled();
+    await expect(page.locator('.word-check')).toBeVisible();
 });
 
 test('Continuar loads the next page after flushed rows leave the list short', async ({ page }) => {

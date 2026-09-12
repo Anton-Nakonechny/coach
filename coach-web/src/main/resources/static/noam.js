@@ -595,10 +595,132 @@ function showStudyListError(errorEl, message, onRetry) {
     errorEl.appendChild(retry);
 }
 
-// Stub — T10 implements the actual noam-seeded 字 quiz.
-function startWordQuizFromNoam(items) {
-    console.log(`startWordQuizFromNoam stub: ${items.length} item(s)`);
+// ── T10: seed the 字 quiz from the noam study-item selection ──────
+// Mints a set via /seed (no LLM call) from the checked {lexemeId, spanish, english}
+// triples, then hands off to the same buildWordCheck/checkWords the hand-typed 字
+// quiz uses — a 文-sourced set is indistinguishable in the DOM.
+
+// Map<responseSpanish, {lexemeId, spanish, english}> for the active 文-sourced set,
+// or null when the open 字 quiz (if any) was hand-typed/LLM-translated. Consulted by
+// the patched retryMissedInWords below and cleared by the patched setSpanishMode.
+let noamWordSource = null;
+
+async function startWordQuizFromNoam(items) {
+    // /seed rejects the whole batch if any item has a blank english (noam study
+    // items can be untranslated), and by the time that happens the checked
+    // selection is already gone from the study list — so drop those items here,
+    // before the request goes out, instead of losing the whole selection to a 400.
+    items = (items || []).filter(it => it.english && it.english.trim());
+    if (items.length === 0) return;
+    chatInput.disabled = true;
+    sendButton.disabled = true;
+    attachButton.disabled = true;
+    // The 語/字/文 glyphs aren't composer controls, but a click here would run
+    // selectSpanishMode synchronously and then get stomped when this fetch resolves
+    // (setSpanishMode('words') + resetToSetup()) — so disable them for the duration too.
+    const glyphButtons = spanishModeToggle ? [...spanishModeToggle.querySelectorAll('.mode-btn')] : [];
+    glyphButtons.forEach(b => { b.disabled = true; });
+
+    const loadingMessage = createLoadingMessage();
+    chatMessages.appendChild(loadingMessage);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    try {
+        const resp = await fetch(`${API_URL}/spanish/words/seed`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.message || 'Error seeding word set');
+        loadingMessage.remove();
+        // The glyph toggle still reads 文 (documents mode) at this point — flip it to
+        // 字 so the quiz looks and behaves like a normal one: without this, clicking 字
+        // while this quiz is showing would treat it as a fresh mode switch instead of a
+        // no-op and blow the quiz away into the paste-words screen.
+        setSpanishMode('words');
+        resetToSetup();
+        activeSetup = null;
+        cacheNoamWordSource(items, data.items);
+        buildWordCheck(data.setId, data.items);
+    } catch (err) {
+        loadingMessage.remove();
+        addError(err);
+    } finally {
+        chatInput.disabled = false;
+        sendButton.disabled = false;
+        attachButton.disabled = false;
+        glyphButtons.forEach(b => { b.disabled = false; });
+    }
 }
+
+// Mirrors Text.stripEdges (coach-core): trims leading/trailing non-letter characters
+// so a request's spanish matches the /seed response's edge-stripped value.
+function stripEdges(s) {
+    return s.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+}
+
+// The /seed response edge-strips each spanish value (Text.stripEdges), so it can
+// differ from the raw noam displayText sent in. Key the cache by the RESPONSE's
+// spanish — that's also what /check later echoes back in results[].spanish — and
+// recover the matching lexemeId via the (locally edge-stripped) request spanish.
+// Keying by spanish rather than english matters: two study items routinely share an
+// english gloss (saber/conocer → "to know"), and a plain Map keyed by english would
+// collapse them, silently reporting both duplicate-gloss words' grades to one lexeme.
+function cacheNoamWordSource(requestItems, responseItems) {
+    const bySpanish = new Map(requestItems.map(it => [stripEdges(it.spanish), it]));
+    noamWordSource = new Map();
+    responseItems.forEach(respItem => {
+        const src = bySpanish.get(respItem.spanish);
+        if (src) noamWordSource.set(respItem.spanish, { lexemeId: src.lexemeId, spanish: respItem.spanish, english: respItem.english });
+    });
+}
+
+// Hook #1: while a 文-sourced quiz is active, "De nuevo 字" and the missed-words
+// "字" button (both call this) must re-seed via /seed instead of translateWords'
+// LLM call, so every graded pass keeps reporting to noam. A hand-typed 字 quiz never
+// populates noamWordSource, so it always falls through to the original behaviour.
+const retryMissedInWordsViaLlm = retryMissedInWords;
+retryMissedInWords = function (words) {
+    if (noamWordSource) {
+        // Require every missed word to be in the cache: a partial hit would silently
+        // drop the cache-miss words from the redrill instead of falling back for them.
+        const items = words.map(w => noamWordSource.get(w)).filter(Boolean);
+        if (items.length === words.length) {
+            setCoachRadio('spanish');
+            setSpanishMode('words');
+            startWordQuizFromNoam(items);
+            return;
+        }
+    }
+    retryMissedInWordsViaLlm(words);
+};
+
+// Hook #2: clear on leaving 字 mode entirely (→ 語 or 文). Guard on `mode !== 'words'`
+// rather than clearing unconditionally: selectSpanishMode (script.js) always calls
+// setSpanishMode('words') itself, synchronously, right before dispatching to
+// retryMissedInWords whenever pendingMissedWords is still set and the glyph is
+// re-clicked while already on 字 — an unconditional clear here would wipe the cache
+// out from under that very call, before Hook #1 ever gets to read it (caught by hand:
+// re-clicking 字 right after grading a noam quiz silently fell back to an LLM call).
+// Staying in 'words' never needs a clear on its own — Hook #3 below clears whenever an
+// LLM-backed quiz actually mints, which is the only event that makes the cache stale.
+const setSpanishModeBase = setSpanishMode;
+setSpanishMode = function (mode) {
+    if (mode !== 'words') noamWordSource = null;
+    setSpanishModeBase(mode);
+};
+
+// Hook #3: translateWords is the sole entry point for an LLM-backed 字 quiz — the
+// fresh hand-typed paste, and Hook #1's own fallback when a missed word isn't in the
+// cache. Clearing right here (rather than trying to catch every possible "the user
+// moved on" event) means the cache can only ever go stale between one noam quiz and
+// the next real LLM mint, never in between.
+const translateWordsViaLlm = translateWords;
+translateWords = function (words) {
+    noamWordSource = null;
+    return translateWordsViaLlm(words);
+};
 
 // ── Drag-and-drop onto the grid ───────────────────────────────
 // Mirrors setupDragAndDrop()'s visual idiom from script.js (dragCounter + .drop-overlay
