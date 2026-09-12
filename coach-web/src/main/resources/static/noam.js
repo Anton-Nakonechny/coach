@@ -606,10 +606,20 @@ function showStudyListError(errorEl, message, onRetry) {
 let noamWordSource = null;
 
 async function startWordQuizFromNoam(items) {
-    if (!items || items.length === 0) return;
+    // /seed rejects the whole batch if any item has a blank english (noam study
+    // items can be untranslated), and by the time that happens the checked
+    // selection is already gone from the study list — so drop those items here,
+    // before the request goes out, instead of losing the whole selection to a 400.
+    items = (items || []).filter(it => it.english && it.english.trim());
+    if (items.length === 0) return;
     chatInput.disabled = true;
     sendButton.disabled = true;
     attachButton.disabled = true;
+    // The 語/字/文 glyphs aren't composer controls, but a click here would run
+    // selectSpanishMode synchronously and then get stomped when this fetch resolves
+    // (setSpanishMode('words') + resetToSetup()) — so disable them for the duration too.
+    const glyphButtons = spanishModeToggle ? [...spanishModeToggle.querySelectorAll('.mode-btn')] : [];
+    glyphButtons.forEach(b => { b.disabled = true; });
 
     const loadingMessage = createLoadingMessage();
     chatMessages.appendChild(loadingMessage);
@@ -640,6 +650,7 @@ async function startWordQuizFromNoam(items) {
         chatInput.disabled = false;
         sendButton.disabled = false;
         attachButton.disabled = false;
+        glyphButtons.forEach(b => { b.disabled = false; });
     }
 }
 
@@ -672,8 +683,10 @@ function cacheNoamWordSource(requestItems, responseItems) {
 const retryMissedInWordsViaLlm = retryMissedInWords;
 retryMissedInWords = function (words) {
     if (noamWordSource) {
+        // Require every missed word to be in the cache: a partial hit would silently
+        // drop the cache-miss words from the redrill instead of falling back for them.
         const items = words.map(w => noamWordSource.get(w)).filter(Boolean);
-        if (items.length > 0) {
+        if (items.length === words.length) {
             setCoachRadio('spanish');
             setSpanishMode('words');
             startWordQuizFromNoam(items);
