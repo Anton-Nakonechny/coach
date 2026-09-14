@@ -260,11 +260,19 @@ function setCoachRadiosDisabled(disabled) {
     document.querySelectorAll('input[name="coach"]').forEach(r => { r.disabled = disabled; });
 }
 
-async function onCoachSelected(value) {
-    coachNote.textContent = '';
+// Clear the state that drives sendMessage's dispatch (as opposed to
+// spanishMode, which only drives the 語/字/文 glyph pixels). Anything that
+// enters a coach setup screen or opens a persisted conversation must call
+// this so sendMessage doesn't keep routing to a setup that's no longer shown.
+function resetSetupState() {
     activeSetup = null;
     selectedTopic = null;
-    pendingMissedWords = null;  // a fresh coach entry ends any pending word drill
+    pendingMissedWords = null;
+}
+
+async function onCoachSelected(value) {
+    coachNote.textContent = '';
+    resetSetupState();
     if (value === 'none') {
         startNewChat();
         return;
@@ -1025,8 +1033,11 @@ async function practiceMissed(words) {
         if (!resp.ok) throw new Error(data.message || 'Failed to start practice');
         loadingMessage.remove();
         await loadConversations();
-        await openConversation(data.conversationId);
-        setSpanishMode('language');  // switch toggle back to 語
+        // preserveNoamSource: this conversation carries the SAME missed words a
+        // noam-sourced 字 quiz just graded, and the user is expected to return to
+        // 字 — openConversation's setSpanishMode('language') must not wipe the
+        // lexemeId cache that return trip needs (noam.js Hook #2).
+        await openConversation(data.conversationId, { preserveNoamSource: true });
     } catch (err) {
         loadingMessage.remove();
         addError(err);
@@ -1222,9 +1233,7 @@ function activateQuiz() {
 // ── Conversations ─────────────────────────────────────────────
 
 function startNewChat() {
-    activeSetup = null;
-    selectedTopic = null;
-    pendingMissedWords = null;
+    resetSetupState();
     currentConversationId = null;
     chatMessages.innerHTML = '';
     addMessage("New chat. Pick a model on the left and ask me anything.", 'assistant');
@@ -1327,7 +1336,7 @@ async function clearAllConversations() {
     }
 }
 
-async function openConversation(conversationId) {
+async function openConversation(conversationId, opts) {
     try {
         const response = await fetch(`${API_URL}/conversations/${conversationId}`);
         if (!response.ok) throw new Error('Failed to load conversation');
@@ -1337,6 +1346,15 @@ async function openConversation(conversationId) {
         messages.forEach(m => addMessage(m.content, m.role, m.attachments, m.sentences, m.question));
         highlightActiveConversation();
         setCoachRadio(conversationCoach[conversationId] || 'none');
+        // Words/documents modes are client-only overlays on top of a persisted
+        // 語 chat — no stored conversation is ever "in" 字 or 文. Reset the
+        // glyph so it doesn't keep showing whatever mode was active before,
+        // and reset the setup-dispatch state alongside it so sendMessage
+        // doesn't keep routing to whatever setup screen was open before.
+        // opts forwards through to setSpanishMode (e.g. practiceMissed's
+        // preserveNoamSource) — every other caller omits it and behaves as before.
+        setSpanishMode('language', opts);
+        resetSetupState();
         activateQuiz();
     } catch (e) {
         console.error(e);

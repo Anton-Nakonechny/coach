@@ -83,6 +83,12 @@ Request flow (`coach-web`): `static/script.js` → `POST /api/chat` →
 the assistant turn, returns the answer. The Anthropic API is stateless, so **every
 turn resends the full history** rebuilt from disk.
 
+Whenever a static JS file changes (`script.js`, `noam.js`), bump its own
+cache-bust query string in `static/index.html` (`<script src="script.js?v=N">`,
+increment `N`). Each file has its own independent `v`; only bump the one(s) you
+touched. Without it, returning users keep the browser-cached old file and never
+see the fix.
+
 - **`model/ModelsConfig`** — source of truth. The ordered `MODELS` list drives both
   the `/api/models` UI payload and per-model request shaping; `supportsEffort` /
   `adaptiveThinking` flags encode the "ignored if not applicable" rule. Adding,

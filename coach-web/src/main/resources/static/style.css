@@ -551,14 +551,14 @@ header { display: none; }
 
 /* ── 文 documents mode tab shell ─────────────────────────────── */
 
-.noam-shell { display: flex; flex-direction: column; gap: 0.75rem; padding: 0.5rem 0; }
+.noam-shell { display: flex; flex-direction: column; gap: 0.75rem; padding: 0.5rem 0; flex: 1; min-height: 0; }
 .noam-tabs { display: inline-flex; border: 1px solid var(--coach-accent); border-radius: 8px; align-self: flex-start; }
 .noam-tab { padding: 0.4rem 0.9rem; font-size: 0.85rem; background: transparent; color: var(--coach-accent); border: none; cursor: pointer; }
 .noam-tab:first-child { border-radius: 7px 0 0 7px; }
 .noam-tab:last-child  { border-radius: 0 7px 7px 0; }
 .noam-tab.active { background: var(--coach-accent); color: #fff; }
 .noam-tab:focus-visible { outline: 2px solid var(--coach-accent); outline-offset: -2px; }
-.noam-panel { min-height: 4rem; }
+.noam-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 /* ── Documentos tab (T07): toolbar, grid, drop zone, error states ───────── */
 
@@ -623,7 +623,7 @@ header { display: none; }
 .noam-study-header { display: flex; align-items: center; gap: 0.5rem; }
 .noam-study-title { font-size: 0.95rem; font-weight: 600; color: var(--text-primary); word-break: break-word; }
 .noam-study-toolbar { margin: 0.5rem 0; }
-.noam-study-list { display: flex; flex-direction: column; gap: 0.4rem; max-height: 50vh; overflow-y: auto; margin-bottom: 0.5rem; }
+.noam-study-list { display: flex; flex-direction: column; gap: 0.4rem; flex: 1; min-height: 0; overflow-y: auto; margin-bottom: 0.5rem; }
 .noam-study-spanish { flex: 1; font-weight: 600; color: var(--text-primary); }
 .noam-mark-btn { flex-shrink: 0; }
 .noam-mark-known.active { border-color: #2e7d32; color: #2e7d32; }
