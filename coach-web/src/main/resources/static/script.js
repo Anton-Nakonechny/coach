@@ -59,7 +59,7 @@ function addError(error, retryHint = '') {
 // DOM elements
 let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
     conversationList, clearAllButton, attachButton, fileInput, attachmentStrip,
-    composerError, dropOverlay, coachNote,
+    composerError, dropOverlay, coachNote, offlineBanner,
     sidebar, coachPanel, sidebarToggle, coachToggle, drawerBackdrop,
     spanishModeToggle,
     sidebarCollapse, coachCollapse, sidebarRestore, coachRestore;
@@ -79,6 +79,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     composerError   = document.getElementById('composerError');
     dropOverlay     = document.getElementById('dropOverlay');
     coachNote       = document.getElementById('coachNote');
+    offlineBanner   = document.getElementById('offlineBanner');
     sidebar         = document.getElementById('sidebar');
     coachPanel      = document.getElementById('coachPanel');
     sidebarToggle      = document.getElementById('sidebarToggle');
@@ -95,7 +96,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyPanelState();
     await loadModels();
     await loadConversations();
-    startNewChat();
+    // A restored draft owns the screen; only a cold start gets the welcome message.
+    if (!restoreDraft()) startNewChat();
+    flushOutbox();
 });
 
 function setupEventListeners() {
@@ -111,6 +114,7 @@ function setupEventListeners() {
         }
     });
     chatInput.addEventListener('input', autoResize);
+    chatInput.addEventListener('input', saveDraftSoon);
     chatInput.addEventListener('paste', handlePaste);
     document.getElementById('newChatButton').addEventListener('click', () => {
         startNewChat();
@@ -136,6 +140,16 @@ function setupEventListeners() {
     spanishModeToggle.addEventListener('click', (e) => {
         const mode = e.target.dataset.mode;
         if (mode) selectSpanishMode(mode);
+    });
+    // Persist before the tab can be discarded, and retry the outbox whenever the
+    // device comes back — a phone waking on the home network usually only fires
+    // visibilitychange, never a reload.
+    window.addEventListener('pagehide', saveDraftNow);
+    window.addEventListener('offline', () => setServerReachable(false));
+    window.addEventListener('online', () => { setServerReachable(true); flushOutbox(); });
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') saveDraftNow();
+        else flushOutbox();
     });
     sidebarCollapse.addEventListener('click', () => togglePanelCollapsed('sidebar'));
     sidebarRestore.addEventListener('click', () => togglePanelCollapsed('sidebar'));
@@ -168,6 +182,182 @@ function togglePanelCollapsed(key) {
     collapsed[key] = !collapsed[key];
     localStorage.setItem(PANEL_COLLAPSE_KEY, JSON.stringify(collapsed));
     applyPanelState();
+}
+
+// ── Offline draft + outbox ───────────────────────────────────
+// Mobile Chrome discards background tabs and re-navigates on focus, so a phone
+// carried out of the server's network loses both the rendered sentences and the
+// answers typed against them. Three pieces make that survivable without a service
+// worker (which needs a secure context this plain-http LAN origin can't offer):
+// the /api/models payload is cached so a cold offline load still has a model key
+// to send with, the on-screen chat plus composer text are snapshotted to
+// localStorage, and a send that fails on the network is queued and replayed once
+// the server is reachable again. An in-flight 字 quiz is deliberately out of
+// scope: its pairs live in the server's WordSetStore, which is single-use and
+// expires after an hour, so a deferred /check could not be graded anyway.
+
+const DRAFT_KEY  = 'coach.draft';
+const OUTBOX_KEY = 'coach.outbox';
+const MODELS_KEY = 'coach.models';
+const DRAFT_MAX_MESSAGES = 40;
+
+let serverReachable = true;
+let draftTimer = null;
+
+function readJson(key) {
+    try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
+}
+
+function writeJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); }
+    catch (e) { console.warn(`Could not persist ${key}:`, e); }
+}
+
+// Every rendered bubble keeps the arguments it was built from (see addMessage),
+// so the chat redraws identically without asking the server for it again.
+function snapshotMessages() {
+    return [...chatMessages.querySelectorAll('.message')]
+        .map(el => el._snapshot)
+        .filter(Boolean)
+        .slice(-DRAFT_MAX_MESSAGES);
+}
+
+function saveDraftNow() {
+    clearTimeout(draftTimer);
+    if (!chatMessages) return;
+    const messages = snapshotMessages();
+    if (!messages.length && !chatInput.value) { clearDraft(); return; }
+    writeJson(DRAFT_KEY, {
+        savedAt: Date.now(),
+        conversationId: currentConversationId,
+        coachType: conversationCoach[currentConversationId] || 'none',
+        composerText: chatInput.value,
+        spanishMode,
+        messages,
+    });
+}
+
+function saveDraftSoon() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraftNow, 300);
+}
+
+function clearDraft() {
+    clearTimeout(draftTimer);
+    try { localStorage.removeItem(DRAFT_KEY); } catch {}
+}
+
+/**
+ * Redraw the last snapshot over the empty chat pane. Only worth doing when there
+ * is typed text to rescue or the server is unreachable — otherwise a plain reload
+ * should still land on a fresh chat the way it always has. Returns true when it
+ * took over the screen, so the caller can skip startNewChat().
+ */
+function restoreDraft() {
+    const draft = readJson(DRAFT_KEY);
+    if (!draft || !draft.messages || !draft.messages.length) return false;
+    if (serverReachable && !draft.composerText) return false;
+
+    currentConversationId = draft.conversationId || null;
+    const coachType = draft.coachType || 'none';
+    if (currentConversationId) conversationCoach[currentConversationId] = coachType;
+
+    chatMessages.innerHTML = '';
+    draft.messages.forEach(m => {
+        const el = addMessage(m.content, m.role, m.attachments, m.sentences, m.question);
+        if (!m.outboxId) return;
+        el.classList.add('pending');
+        el._snapshot.outboxId = m.outboxId;
+    });
+    chatInput.value = draft.composerText || '';
+    autoResize();
+    // A setup screen (topic grid, word prompt) renders outside addMessage and so
+    // isn't in the snapshot — leave the dispatch state clear so the restored
+    // composer sends a plain turn instead of waiting on a topic that isn't shown.
+    resetSetupState();
+    setCoachRadio(coachType);
+    setSpanishMode(draft.spanishMode || 'language');
+    highlightActiveConversation();
+    activateQuiz();
+    return true;
+}
+
+function readOutbox() {
+    const items = readJson(OUTBOX_KEY);
+    return Array.isArray(items) ? items : [];
+}
+
+function queueSend(body) {
+    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, queuedAt: Date.now(), body };
+    writeJson(OUTBOX_KEY, [...readOutbox(), item]);
+    return item;
+}
+
+function dropFromOutbox(id) {
+    writeJson(OUTBOX_KEY, readOutbox().filter(i => i.id !== id));
+}
+
+// fetch() rejects with a TypeError when the request never left the device or the
+// host couldn't be resolved. A timeout arrives as an AbortError and a rejection
+// from the server as our own Error — both may have been processed already, so
+// only a TypeError is safe to replay automatically.
+function isNetworkFailure(error) {
+    return error instanceof TypeError || error.message === 'Failed to fetch';
+}
+
+/** Replay queued turns oldest-first, stopping at the first still-unreachable send. */
+async function flushOutbox() {
+    const items = readOutbox();
+    if (!items.length) return;
+    for (const item of items) {
+        try {
+            const response = await fetch(`${API_URL}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(item.body),
+            });
+            const data = await response.json().catch(() => ({}));
+            dropFromOutbox(item.id);
+            if (response.ok) settleQueued(item, data);
+            else addError(new Error(data.message || 'A queued message was rejected'));
+        } catch (e) {
+            setServerReachable(false);
+            break;
+        }
+    }
+    renderOutboxNote();
+    loadConversations();
+}
+
+/** Land a replayed turn's answer, but only when its pending bubble is on screen. */
+function settleQueued(item, data) {
+    const bubble = [...chatMessages.querySelectorAll('.message.user.pending')]
+        .find(el => el._snapshot && el._snapshot.outboxId === item.id);
+    if (!bubble) return;
+    bubble.classList.remove('pending');
+    delete bubble._snapshot.outboxId;
+    currentConversationId = data.conversationId;
+    addMessage(data.answer, 'assistant', null, data.sentences, data.question);
+    activateQuiz();
+    saveDraftNow();
+}
+
+function setServerReachable(reachable) {
+    serverReachable = reachable;
+    renderOutboxNote();
+}
+
+function renderOutboxNote() {
+    if (!offlineBanner) return;
+    const queued = readOutbox().length;
+    const plural = queued === 1 ? 'message' : 'messages';
+    let text = '';
+    if (serverReachable) text = queued ? `⏳ ${queued} ${plural} queued — sending…` : '';
+    else text = queued
+        ? `⏳ Offline — ${queued} ${plural} queued; sending resumes when the server is reachable.`
+        : '⏳ Offline — the server is unreachable. Keep typing; your draft is saved on this device.';
+    offlineBanner.textContent = text;
+    offlineBanner.hidden = !text;
 }
 
 function setSpanishMode(mode) {
@@ -640,8 +830,22 @@ function setupDragAndDrop() {
 // ── Model / effort ───────────────────────────────────────────
 
 async function loadModels() {
-    const response = await fetch(`${API_URL}/models`);
-    const data = await response.json();
+    let data = null;
+    let fromServer = false;
+    try {
+        const response = await fetch(`${API_URL}/models`);
+        data = await response.json();
+        fromServer = true;
+        writeJson(MODELS_KEY, data);
+    } catch (e) {
+        // Offline cold start: the cached payload keeps the model rail usable and,
+        // more importantly, gives a queued turn a model key to be replayed with.
+        data = readJson(MODELS_KEY);
+        console.warn('Could not reach /api/models; falling back to the cached payload:', e);
+    }
+    setServerReachable(fromServer);
+    if (!data) return;
+
     models = data.models;
     effortLevels = data.effortLevels;
     currentModel = data.defaultModel;
@@ -740,24 +944,27 @@ async function sendMessage() {
     attachButton.disabled = true;
 
     const isSpanishFirst = activeSetup === 'spanish';
-    addMessage(message, 'user', attachmentsSnapshot);
+    const userBubble = addMessage(message, 'user', attachmentsSnapshot);
 
     const loadingMessage = createLoadingMessage();
     chatMessages.appendChild(loadingMessage);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    // Built before the try so the catch can queue this exact body for a replay.
+    const body = {
+        message,
+        model: currentModel,
+        effort: currentEffort,
+        conversationId: currentConversationId,
+        ...(activeSetup === 'spanish' && { coachType: 'spanish', topic: selectedTopic }),
+    };
+    const payload = JSON.stringify(body);
 
     // Abort if the server doesn't respond within 6 minutes (server-side timeout is 5m).
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
 
     try {
-        const payload = JSON.stringify({
-            message,
-            model: currentModel,
-            effort: currentEffort,
-            conversationId: currentConversationId,
-            ...(activeSetup === 'spanish' && { coachType: 'spanish', topic: selectedTopic }),
-        });
         let response;
         if (attachmentsSnapshot.length > 0) {
             const form = new FormData();
@@ -797,6 +1004,17 @@ async function sendMessage() {
         }
     } catch (error) {
         loadingMessage.remove();
+        // The server never saw this turn, so it can wait on disk and be replayed
+        // verbatim — the bubble stays on screen marked pending instead of the
+        // text bouncing back into the composer. Attachments are excluded: a File
+        // can't be serialized into the queue.
+        if (isNetworkFailure(error) && attachmentsSnapshot.length === 0 && message) {
+            userBubble.classList.add('pending');
+            userBubble._snapshot.outboxId = queueSend(body).id;
+            setServerReachable(false);
+            saveDraftNow();
+            return;
+        }
         // Re-enable any quiz buttons that were disabled before the failed send,
         // so the user can still pick an answer without losing the question.
         chatMessages.querySelectorAll('.quiz-option:disabled')
@@ -1141,6 +1359,16 @@ function addMessage(content, type, attachments, sentences, question) {
     if (content) messageDiv.appendChild(buildCopyButton(content));
     chatMessages.appendChild(messageDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+    // Keep what this bubble was built from so the chat can be snapshotted for an
+    // offline reload. File/objectUrl don't survive JSON, so attachments collapse
+    // to the chip shape a restored bubble would render anyway.
+    messageDiv._snapshot = {
+        content, role: type, sentences, question,
+        attachments: attachments && attachments.map(a =>
+            ({ filename: a.file ? a.file.name : a.filename, kind: a.kind })),
+    };
+    saveDraftSoon();
+    return messageDiv;
 }
 
 function buildSentenceCards(sentences) {
@@ -1234,6 +1462,7 @@ function activateQuiz() {
 
 function startNewChat() {
     resetSetupState();
+    clearDraft();
     currentConversationId = null;
     chatMessages.innerHTML = '';
     addMessage("New chat. Pick a model on the left and ask me anything.", 'assistant');
