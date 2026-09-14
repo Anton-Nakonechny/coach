@@ -1033,8 +1033,11 @@ async function practiceMissed(words) {
         if (!resp.ok) throw new Error(data.message || 'Failed to start practice');
         loadingMessage.remove();
         await loadConversations();
-        await openConversation(data.conversationId);
-        setSpanishMode('language');  // switch toggle back to 語
+        // preserveNoamSource: this conversation carries the SAME missed words a
+        // noam-sourced 字 quiz just graded, and the user is expected to return to
+        // 字 — openConversation's setSpanishMode('language') must not wipe the
+        // lexemeId cache that return trip needs (noam.js Hook #2).
+        await openConversation(data.conversationId, { preserveNoamSource: true });
     } catch (err) {
         loadingMessage.remove();
         addError(err);
@@ -1333,7 +1336,7 @@ async function clearAllConversations() {
     }
 }
 
-async function openConversation(conversationId) {
+async function openConversation(conversationId, opts) {
     try {
         const response = await fetch(`${API_URL}/conversations/${conversationId}`);
         if (!response.ok) throw new Error('Failed to load conversation');
@@ -1348,7 +1351,9 @@ async function openConversation(conversationId) {
         // glyph so it doesn't keep showing whatever mode was active before,
         // and reset the setup-dispatch state alongside it so sendMessage
         // doesn't keep routing to whatever setup screen was open before.
-        setSpanishMode('language');
+        // opts forwards through to setSpanishMode (e.g. practiceMissed's
+        // preserveNoamSource) — every other caller omits it and behaves as before.
+        setSpanishMode('language', opts);
         resetSetupState();
         activateQuiz();
     } catch (e) {

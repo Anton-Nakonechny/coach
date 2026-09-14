@@ -600,9 +600,13 @@ function showStudyListError(errorEl, message, onRetry) {
 // triples, then hands off to the same buildWordCheck/checkWords the hand-typed 字
 // quiz uses — a 文-sourced set is indistinguishable in the DOM.
 
-// Map<responseSpanish, {lexemeId, spanish, english}> for the active 文-sourced set,
-// or null when the open 字 quiz (if any) was hand-typed/LLM-translated. Consulted by
-// the patched retryMissedInWords below and cleared by the patched setSpanishMode.
+// Map<responseSpanish, {lexemeId, spanish, english}[]> for the active 文-sourced set,
+// or null when the open 字 quiz (if any) was hand-typed/LLM-translated. A multimap,
+// not a single-valued map: two different lexemes can share a spanish surface form
+// (vino, como, bajo, sobre — real Spanish homographs), so a plain Map keyed by
+// spanish would let one overwrite the other's cache entry. Consulted (and drained
+// per-lookup via shift()) by the patched retryMissedInWords below, and cleared by
+// the patched setSpanishMode.
 let noamWordSource = null;
 
 async function startWordQuizFromNoam(items) {
@@ -667,12 +671,26 @@ function stripEdges(s) {
 // Keying by spanish rather than english matters: two study items routinely share an
 // english gloss (saber/conocer → "to know"), and a plain Map keyed by english would
 // collapse them, silently reporting both duplicate-gloss words' grades to one lexeme.
+// Both bySpanish and noamWordSource are multimaps (arrays per key), not single-valued
+// Maps: two lexemes can also share the same SPANISH surface form (homographs), and a
+// plain Map.set would let the second overwrite the first here too. requestItems and
+// responseItems are same-length/same-order (both derived from one /seed round-trip),
+// so zipping same-key entries in encounter order (shift the oldest queued request
+// item for each response item) pairs them correctly without cross-lexeme mixups.
 function cacheNoamWordSource(requestItems, responseItems) {
-    const bySpanish = new Map(requestItems.map(it => [stripEdges(it.spanish), it]));
+    const bySpanish = new Map();
+    requestItems.forEach(it => {
+        const key = stripEdges(it.spanish);
+        if (!bySpanish.has(key)) bySpanish.set(key, []);
+        bySpanish.get(key).push(it);
+    });
     noamWordSource = new Map();
     responseItems.forEach(respItem => {
-        const src = bySpanish.get(respItem.spanish);
-        if (src) noamWordSource.set(respItem.spanish, { lexemeId: src.lexemeId, spanish: respItem.spanish, english: respItem.english });
+        const queue = bySpanish.get(respItem.spanish);
+        const src = queue && queue.shift();
+        if (!src) return;
+        if (!noamWordSource.has(respItem.spanish)) noamWordSource.set(respItem.spanish, []);
+        noamWordSource.get(respItem.spanish).push({ lexemeId: src.lexemeId, spanish: respItem.spanish, english: respItem.english });
     });
 }
 
@@ -685,7 +703,10 @@ retryMissedInWords = function (words) {
     if (noamWordSource) {
         // Require every missed word to be in the cache: a partial hit would silently
         // drop the cache-miss words from the redrill instead of falling back for them.
-        const items = words.map(w => noamWordSource.get(w)).filter(Boolean);
+        // .shift() (not .get()) so that if the missed list contains the same surface
+        // form twice (two homograph twins both missed), each occurrence drains a
+        // different queued lexemeId instead of both resolving to the same one.
+        const items = words.map(w => { const q = noamWordSource.get(w); return q && q.shift(); }).filter(Boolean);
         if (items.length === words.length) {
             setCoachRadio('spanish');
             setSpanishMode('words');
@@ -705,9 +726,18 @@ retryMissedInWords = function (words) {
 // re-clicking 字 right after grading a noam quiz silently fell back to an LLM call).
 // Staying in 'words' never needs a clear on its own — Hook #3 below clears whenever an
 // LLM-backed quiz actually mints, which is the only event that makes the cache stale.
+//
+// The optional opts.preserveNoamSource escape hatch exists for exactly one caller:
+// practiceMissed's "Practicar ... 語" detour (script.js), which sends the SAME missed
+// words into a 語 sentence-practice conversation the user is expected to return from.
+// Without it, openConversation's unconditional setSpanishMode('language') would wipe
+// the cache before the round trip even completes, so the later 字 click could never
+// report back to noam even though the words never actually changed. Every other
+// caller (sidebar history clicks, the 文-unavailable fallback, etc.) omits opts and
+// keeps clearing as before — only this one flow claims the words are still live.
 const setSpanishModeBase = setSpanishMode;
-setSpanishMode = function (mode) {
-    if (mode !== 'words') noamWordSource = null;
+setSpanishMode = function (mode, opts) {
+    if (mode !== 'words' && !(opts && opts.preserveNoamSource)) noamWordSource = null;
     setSpanishModeBase(mode);
 };
 
