@@ -203,6 +203,19 @@ const DRAFT_MAX_MESSAGES = 40;
 
 let serverReachable = true;
 let draftTimer = null;
+let flushing = false;
+
+// A turn queued before its chat has been minted carries conversationId: null, and
+// so does a turn queued in a *different* chat started while still offline — the
+// two are indistinguishable from the body alone. This token disambiguates them:
+// it is regenerated whenever the composer starts addressing a fresh unminted
+// chat, so flushOutbox can hand the first mint's id to that chat's later turns
+// and only to those.
+let pendingChatKey = newChatKey();
+
+function newChatKey() {
+    return `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 function readJson(key) {
     try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
@@ -288,7 +301,12 @@ function readOutbox() {
 }
 
 function queueSend(body) {
-    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, queuedAt: Date.now(), body };
+    const item = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        queuedAt: Date.now(),
+        chatKey: body.conversationId || pendingChatKey,
+        body,
+    };
     writeJson(OUTBOX_KEY, [...readOutbox(), item]);
     return item;
 }
@@ -305,34 +323,83 @@ function isNetworkFailure(error) {
     return error instanceof TypeError || error.message === 'Failed to fetch';
 }
 
-/** Replay queued turns oldest-first, stopping at the first still-unreachable send. */
+/**
+ * Replay queued turns oldest-first, stopping at the first still-unreachable send.
+ *
+ * Guarded against re-entry: a phone waking on the home network fires `online` and
+ * `visibilitychange` back to back, and two overlapping drains would both read the
+ * queue before either could remove anything — POSTing every item twice, which the
+ * server happily persists twice. (The guard is per-tab; two tabs sharing this
+ * origin's localStorage would still double-send.)
+ */
 async function flushOutbox() {
+    if (flushing) return;
     const items = readOutbox();
     if (!items.length) return;
-    for (const item of items) {
-        try {
-            const response = await fetch(`${API_URL}/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(item.body),
-            });
-            const data = await response.json().catch(() => ({}));
-            dropFromOutbox(item.id);
-            if (response.ok) settleQueued(item, data);
-            else addError(new Error(data.message || 'A queued message was rejected'));
-        } catch (e) {
-            setServerReachable(false);
-            break;
+    flushing = true;
+    // Turns queued before their chat existed have no conversationId; the first one
+    // to land mints it, and every later turn from that same chat must be redirected
+    // into it rather than minting a conversation of its own.
+    const mintedByChat = new Map();
+    try {
+        for (const item of items) {
+            const minted = mintedByChat.get(item.chatKey);
+            const body = item.body.conversationId || !minted
+                ? item.body
+                : { ...item.body, conversationId: minted };
+            try {
+                const response = await fetch(`${API_URL}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (response.ok) {
+                    dropFromOutbox(item.id);
+                    if (!body.conversationId) mintedByChat.set(item.chatKey, data.conversationId);
+                    settleQueued(item, data);
+                } else {
+                    // Terminal: a rejection will not become an acceptance on retry,
+                    // so the item leaves the queue here too — but only after its text
+                    // has been handed back, never silently destroyed.
+                    dropFromOutbox(item.id);
+                    failQueued(item, new Error(data.message || 'A queued message was rejected'));
+                }
+            } catch (e) {
+                setServerReachable(false);
+                break;
+            }
         }
+    } finally {
+        flushing = false;
     }
     renderOutboxNote();
     loadConversations();
 }
 
+/** The on-screen bubble a queued turn was drawn as, if it is still mounted. */
+function pendingBubble(item) {
+    return [...chatMessages.querySelectorAll('.message.user.pending')]
+        .find(el => el._snapshot && el._snapshot.outboxId === item.id);
+}
+
+/**
+ * A replayed turn the server refused. The text lives nowhere else by now — the
+ * composer was cleared when it was queued — so put it back the way sendMessage's
+ * own non-network failure does, instead of leaving a dashed bubble that can never
+ * resolve.
+ */
+function failQueued(item, error) {
+    const bubble = pendingBubble(item);
+    if (bubble) bubble.remove();
+    if (!chatInput.value) chatInput.value = item.body.message;
+    autoResize();
+    addError(error, ' Retry: your message has been restored — press Enter to send again.');
+}
+
 /** Land a replayed turn's answer, but only when its pending bubble is on screen. */
 function settleQueued(item, data) {
-    const bubble = [...chatMessages.querySelectorAll('.message.user.pending')]
-        .find(el => el._snapshot && el._snapshot.outboxId === item.id);
+    const bubble = pendingBubble(item);
     if (!bubble) return;
     bubble.classList.remove('pending');
     delete bubble._snapshot.outboxId;
@@ -537,6 +604,7 @@ async function enterSpanishSetup() {
 // Clear the chat pane back to an in-panel setup screen — no conversation open.
 function resetToSetup() {
     currentConversationId = null;
+    pendingChatKey = newChatKey();
     chatMessages.innerHTML = '';
     highlightActiveConversation();
     coachNote.textContent = '';
@@ -964,6 +1032,13 @@ async function sendMessage() {
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
 
+    // The try below also wraps parsing and rendering the answer, and a TypeError
+    // from there (a malformed question reaching buildQuizBlock, say) is
+    // indistinguishable from an unreachable host to isNetworkFailure. Only a
+    // failure raised while this is still false may be queued for replay — past
+    // that point the server has the turn and replaying it would double-post it.
+    let fetchSettled = false;
+
     try {
         let response;
         if (attachmentsSnapshot.length > 0) {
@@ -979,6 +1054,7 @@ async function sendMessage() {
                 signal: controller.signal,
             });
         }
+        fetchSettled = true;
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             throw new Error(err.message || 'Request failed');
@@ -1008,7 +1084,7 @@ async function sendMessage() {
         // verbatim — the bubble stays on screen marked pending instead of the
         // text bouncing back into the composer. Attachments are excluded: a File
         // can't be serialized into the queue.
-        if (isNetworkFailure(error) && attachmentsSnapshot.length === 0 && message) {
+        if (!fetchSettled && isNetworkFailure(error) && attachmentsSnapshot.length === 0 && message) {
             userBubble.classList.add('pending');
             userBubble._snapshot.outboxId = queueSend(body).id;
             setServerReachable(false);
@@ -1464,6 +1540,9 @@ function startNewChat() {
     resetSetupState();
     clearDraft();
     currentConversationId = null;
+    // Turns queued from here belong to this chat, not to the unminted one the
+    // user just walked away from — even though both carry conversationId: null.
+    pendingChatKey = newChatKey();
     chatMessages.innerHTML = '';
     addMessage("New chat. Pick a model on the left and ask me anything.", 'assistant');
     highlightActiveConversation();
