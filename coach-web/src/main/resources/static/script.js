@@ -246,6 +246,7 @@ function saveDraftNow() {
         coachType: conversationCoach[currentConversationId] || 'none',
         composerText: chatInput.value,
         spanishMode,
+        activeSetup,
         messages,
     });
 }
@@ -255,21 +256,40 @@ function saveDraftSoon() {
     draftTimer = setTimeout(saveDraftNow, 300);
 }
 
+// Refused while the outbox still holds a turn. A queued turn's pending bubble
+// exists only in this snapshot, and settleQueued needs it on screen to land the
+// replayed answer — so an emptied chat pane (resetToSetup, a new chat, the noam
+// shell) must not be allowed to take the undelivered turn down with it.
 function clearDraft() {
     clearTimeout(draftTimer);
+    if (readOutbox().length > 0) return;
     try { localStorage.removeItem(DRAFT_KEY); } catch {}
 }
 
 /**
  * Redraw the last snapshot over the empty chat pane. Only worth doing when there
- * is typed text to rescue or the server is unreachable — otherwise a plain reload
- * should still land on a fresh chat the way it always has. Returns true when it
- * took over the screen, so the caller can skip startNewChat().
+ * is something to rescue — typed text, an undelivered turn, or an unreachable
+ * server; otherwise a plain reload should still land on a fresh chat the way it
+ * always has. Returns true when it took over the screen, so the caller can skip
+ * startNewChat().
  */
 function restoreDraft() {
     const draft = readJson(DRAFT_KEY);
     if (!draft || !draft.messages || !draft.messages.length) return false;
-    if (serverReachable && !draft.composerText) return false;
+    if (serverReachable && !draft.composerText && readOutbox().length === 0) return false;
+
+    // A coach's topic grid renders outside addMessage, so its snapshot is nothing
+    // but an orphaned welcome bubble: restoring it would show an instruction whose
+    // grid is gone, and the composer would send the answer as prose. Better to
+    // start clean — carrying the typed text across, since that much does survive.
+    // 字 is the exception, and the reason this is a split rather than a blanket
+    // bail: its entire UI *is* that one bubble, so it restores faithfully.
+    if (draft.activeSetup && draft.activeSetup !== 'spanish-words') {
+        if (!draft.composerText) return false;
+        chatInput.value = draft.composerText;
+        autoResize();
+        return false;
+    }
 
     currentConversationId = draft.conversationId || null;
     const coachType = draft.coachType || 'none';
@@ -284,10 +304,11 @@ function restoreDraft() {
     });
     chatInput.value = draft.composerText || '';
     autoResize();
-    // A setup screen (topic grid, word prompt) renders outside addMessage and so
-    // isn't in the snapshot — leave the dispatch state clear so the restored
-    // composer sends a plain turn instead of waiting on a topic that isn't shown.
     resetSetupState();
+    // Only ever 'spanish-words' by the guard above: restoring it is what makes the
+    // redrawn "pega palabras" prompt route a pasted list to the 字 quiz instead of
+    // posting it to /api/chat as prose.
+    activeSetup = draft.activeSetup || null;
     setCoachRadio(coachType);
     setSpanishMode(draft.spanishMode || 'language');
     highlightActiveConversation();
@@ -1538,13 +1559,16 @@ function activateQuiz() {
 
 function startNewChat() {
     resetSetupState();
-    clearDraft();
     currentConversationId = null;
     // Turns queued from here belong to this chat, not to the unminted one the
     // user just walked away from — even though both carry conversationId: null.
     pendingChatKey = newChatKey();
     chatMessages.innerHTML = '';
     addMessage("New chat. Pick a model on the left and ask me anything.", 'assistant');
+    // After the welcome bubble, not before: addMessage schedules a deferred save
+    // that would otherwise rewrite the draft with it 300 ms later. Clearing here
+    // cancels that timer too, so an untouched new chat really does leave nothing.
+    clearDraft();
     highlightActiveConversation();
     setCoachRadio('none');
     coachNote.textContent = '';
