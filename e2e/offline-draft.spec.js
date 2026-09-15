@@ -1,6 +1,8 @@
 const { test, expect } = require('@playwright/test');
 const { MODELS_RESPONSE } = require('./fixtures');
 
+const NOAM_BASE = 'http://noam.test';
+
 // The draft snapshot has several writers and no owner, so ordinary navigation
 // can quietly destroy state that an undelivered turn still depends on. These
 // cover the three ways that happens.
@@ -57,6 +59,14 @@ test('entering a setup screen keeps an undelivered turn recoverable', async ({ p
     const state = { offline: true, posts: [] };
     await routeDefaults(page);
     await routeChat(page, state);
+    // The 文 button starts disabled until probeNoamAvailability() resolves; stub
+    // both calls it makes so the probe succeeds and the button is clickable.
+    await page.route('**/api/noam/config', route =>
+        route.fulfill({ contentType: 'application/json', body: JSON.stringify({ baseUrl: NOAM_BASE, profileId: 'p1' }) })
+    );
+    await page.route(`${NOAM_BASE}/documents?language=es`, route =>
+        route.fulfill({ contentType: 'application/json', body: JSON.stringify([]) })
+    );
 
     await page.goto('/');
     await page.waitForLoadState('networkidle');
