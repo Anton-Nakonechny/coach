@@ -247,6 +247,10 @@ function saveDraftNow() {
         composerText: chatInput.value,
         spanishMode,
         activeSetup,
+        // Travels with the snapshot because the turns it groups do: a reload
+        // between two offline sends would otherwise mint a fresh key for the
+        // second one and split one chat across two server conversations.
+        pendingChatKey,
         messages,
     });
 }
@@ -284,13 +288,21 @@ function restoreDraft() {
     // start clean — carrying the typed text across, since that much does survive.
     // 字 is the exception, and the reason this is a split rather than a blanket
     // bail: its entire UI *is* that one bubble, so it restores faithfully.
-    if (draft.activeSetup && draft.activeSetup !== 'spanish-words') {
+    const gridSetup = draft.activeSetup && draft.activeSetup !== 'spanish-words';
+    // Español is the one setup that lets a real turn be sent from its own screen
+    // (once a topic is picked), and activeSetup only clears when the answer
+    // arrives — so a queued turn can be sitting inside a grid snapshot. It
+    // outranks the orphaned welcome: wiping the pane would take its bubble with
+    // it and leave the replayed answer nothing to land on.
+    const queuedTurn = draft.messages.some(m => m.outboxId);
+    if (gridSetup && !queuedTurn) {
         if (!draft.composerText) return false;
         chatInput.value = draft.composerText;
         autoResize();
         return false;
     }
 
+    if (draft.pendingChatKey) pendingChatKey = draft.pendingChatKey;
     currentConversationId = draft.conversationId || null;
     const coachType = draft.coachType || 'none';
     if (currentConversationId) conversationCoach[currentConversationId] = coachType;
@@ -305,10 +317,12 @@ function restoreDraft() {
     chatInput.value = draft.composerText || '';
     autoResize();
     resetSetupState();
-    // Only ever 'spanish-words' by the guard above: restoring it is what makes the
+    // 字 is the only setup worth carrying over: restoring it is what makes the
     // redrawn "pega palabras" prompt route a pasted list to the 字 quiz instead of
-    // posting it to /api/chat as prose.
-    activeSetup = draft.activeSetup || null;
+    // posting it to /api/chat as prose. A grid setup that got this far did so on
+    // the strength of its queued turn and its grid is gone, so keeping its name
+    // would only make sendMessage refuse the next message ("Elige un tema primero").
+    activeSetup = draft.activeSetup === 'spanish-words' ? 'spanish-words' : null;
     setCoachRadio(coachType);
     setSpanishMode(draft.spanishMode || 'language');
     highlightActiveConversation();
@@ -368,6 +382,12 @@ async function flushOutbox() {
             const body = item.body.conversationId || !minted
                 ? item.body
                 : { ...item.body, conversationId: minted };
+            // settleQueued renders, and a malformed answer can throw from there —
+            // long after the turn was delivered and dropped from the queue. Same
+            // distinction sendMessage draws with its own flag: past this point a
+            // failure says nothing about whether the server is reachable, so it
+            // must not stop the drain or flip the UI offline.
+            let delivered = false;
             try {
                 const response = await fetch(`${API_URL}/chat`, {
                     method: 'POST',
@@ -375,6 +395,7 @@ async function flushOutbox() {
                     body: JSON.stringify(body),
                 });
                 const data = await response.json().catch(() => ({}));
+                delivered = true;
                 if (response.ok) {
                     dropFromOutbox(item.id);
                     if (!body.conversationId) mintedByChat.set(item.chatKey, data.conversationId);
@@ -387,6 +408,10 @@ async function flushOutbox() {
                     failQueued(item, new Error(data.message || 'A queued message was rejected'));
                 }
             } catch (e) {
+                if (delivered) {
+                    console.warn('A replayed answer could not be rendered:', e);
+                    continue;
+                }
                 setServerReachable(false);
                 break;
             }
@@ -413,9 +438,15 @@ function pendingBubble(item) {
 function failQueued(item, error) {
     const bubble = pendingBubble(item);
     if (bubble) bubble.remove();
-    if (!chatInput.value) chatInput.value = item.body.message;
+    // The composer stayed free while this turn waited, so it may already hold a
+    // newer draft. Both texts exist nowhere else, so the rejected one goes in
+    // above the draft rather than over it.
+    const typed = chatInput.value;
+    chatInput.value = typed ? `${item.body.message}\n\n${typed}` : item.body.message;
     autoResize();
-    addError(error, ' Retry: your message has been restored — press Enter to send again.');
+    addError(error, typed
+        ? ' Retry: your message has been restored above the draft you were typing — edit and press Enter.'
+        : ' Retry: your message has been restored — press Enter to send again.');
 }
 
 /** Land a replayed turn's answer, but only when its pending bubble is on screen. */
@@ -425,7 +456,11 @@ function settleQueued(item, data) {
     bubble.classList.remove('pending');
     delete bubble._snapshot.outboxId;
     currentConversationId = data.conversationId;
-    addMessage(data.answer, 'assistant', null, data.sentences, data.question);
+    // addMessage always appends, but the later queued turns' bubbles are already
+    // mounted below this one — so the answer is moved up under the turn it
+    // answers, which is also the order snapshotMessages then persists.
+    const answer = addMessage(data.answer, 'assistant', null, data.sentences, data.question);
+    bubble.after(answer);
     activateQuiz();
     saveDraftNow();
 }

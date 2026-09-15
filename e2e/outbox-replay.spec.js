@@ -148,6 +148,107 @@ test('a queued turn rejected on replay gives its text back', async ({ page }) =>
     await expect(page.locator('#chatInput')).toHaveValue('primera');
 });
 
+test('a reload between two offline sends keeps both turns in one conversation', async ({ page }) => {
+    const state = chatState();
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    // The tab is discarded and re-navigated while still offline — the very case
+    // this feature exists for. The chat key that ties turn 2 to turn 1's mint
+    // lives in module state, so it only survives if the draft carries it.
+    await page.evaluate(() => window.saveDraftNow());
+    await page.reload();
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    await send(page, 'segunda');
+    await expect(page.locator('.message.user.pending')).toHaveCount(2);
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    await expect.poll(() => state.posts.length).toBe(2);
+    expect(state.minted).toBe(1);
+    expect(state.posts[1].conversationId).toBe('conv-1');
+});
+
+test('replayed answers land under their own turn', async ({ page }) => {
+    const state = chatState();
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await send(page, 'segunda');
+    await expect(page.locator('.message.user.pending')).toHaveCount(2);
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    // Both pending bubbles are already mounted when the replay starts, so an
+    // answer appended to the end of the pane lands under the wrong turn — and
+    // the next snapshot bakes that order in.
+    await expect(page.locator('.message.assistant')).toHaveCount(3);
+    const texts = await page.locator('.message .message-content').allTextContents();
+    expect(texts.slice(-4).map(t => t.trim())).toEqual([
+        'primera', 'respuesta a primera', 'segunda', 'respuesta a segunda',
+    ]);
+});
+
+test('a render failure on a replayed answer does not strand the rest of the queue', async ({ page }) => {
+    // Every answer carries a question with no options, so settleQueued's
+    // buildQuizBlock throws a TypeError from inside the same try that wraps the
+    // fetch — after the turn was delivered and dropped from the queue.
+    const state = chatState({ extra: { question: { stem: 'Sin opciones?' } } });
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await send(page, 'segunda');
+    await expect(page.locator('.message.user.pending')).toHaveCount(2);
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    // A rendering failure is not a network failure: the first item was delivered
+    // and dropped, so the drain must carry on to the second instead of breaking
+    // out and stranding it in the queue.
+    await expect.poll(() => state.posts.length).toBe(2);
+    await expect.poll(() => outboxSize(page)).toBe(0);
+});
+
+test('a rejected replay does not overwrite a draft typed while it waited', async ({ page }) => {
+    const state = chatState({ status: 400, errorMessage: 'Model no longer available' });
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+    // The composer is free while a turn waits in the queue, so the user starts
+    // the next message. Neither text may be thrown away by the rejection.
+    await page.fill('#chatInput', 'otra cosa');
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    await expect(page.locator('.message.assistant').last()).toContainText('Model no longer available');
+    await expect(page.locator('#chatInput')).toHaveValue('primera\n\notra cosa');
+});
+
 test('a render failure after a delivered answer is not queued for replay', async ({ page }) => {
     // A 200 whose question has no options makes buildQuizBlock throw a TypeError
     // from inside the same try that wraps the fetch. The turn is already

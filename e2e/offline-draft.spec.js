@@ -131,6 +131,43 @@ test('a restored 字 screen can still route a pasted word list', async ({ page }
     expect(translateWords).toBe('vino');
 });
 
+test('an undelivered turn outranks the topic-grid fallback', async ({ page }) => {
+    const state = { offline: true, posts: [] };
+    await routeDefaults(page);
+    await routeChat(page, state);
+    await page.route('**/api/coaches/spanish/topics', route =>
+        route.fulfill({
+            contentType: 'application/json',
+            body: JSON.stringify([{ level: 'A1', topics: ['viajes'] }]),
+        })
+    );
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Unlike the other setups, Español lets a real turn be sent once a topic is
+    // picked — and activeSetup stays 'spanish' until a response arrives, so the
+    // reload below finds a queued turn inside a setup snapshot.
+    await page.click('input[name="coach"][value="spanish"]');
+    await page.click('#topicGrid .topic-button');
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    await page.evaluate(() => window.saveDraftNow());
+    await page.reload();
+    await page.waitForLoadState('networkidle');
+
+    // Wiping the pane for a fresh chat would take the pending bubble with it, and
+    // the replayed answer would have nothing to land on.
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    await expect(page.locator('.message.assistant').last()).toContainText('respuesta a primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(0);
+});
+
 test('a restored topic grid falls back to a fresh chat rather than an orphaned welcome', async ({ page }) => {
     await routeDefaults(page);
     await page.route('**/api/coaches/spanish/topics', route =>
