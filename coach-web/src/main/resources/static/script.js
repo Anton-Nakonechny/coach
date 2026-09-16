@@ -227,9 +227,17 @@ function readJson(key) {
     try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
 }
 
+// Reports whether the write landed. setItem throws on a full quota and in some
+// private-storage modes, and one caller — the outbox — is holding the only copy
+// of something, so it has to be able to ask.
 function writeJson(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); }
-    catch (e) { console.warn(`Could not persist ${key}:`, e); }
+    try {
+        localStorage.setItem(key, JSON.stringify(value));
+        return true;
+    } catch (e) {
+        console.warn(`Could not persist ${key}:`, e);
+        return false;
+    }
 }
 
 // Every rendered bubble keeps the arguments it was built from (see addMessage),
@@ -358,6 +366,14 @@ function readOutbox() {
     return Array.isArray(items) ? items : [];
 }
 
+/**
+ * Queue a turn for replay, or null when the queue would not take it.
+ *
+ * The caller has already cleared the composer, so the queue is about to hold the
+ * only copy of this text. If the write did not land there is nothing to replay
+ * it from, and a bubble marked `pending` would be promising a send that can
+ * never happen — the caller has to be told so it can hand the text back instead.
+ */
 function queueSend(body) {
     const item = {
         id: newId(),
@@ -365,8 +381,7 @@ function queueSend(body) {
         chatKey: body.conversationId || pendingChatKey,
         body,
     };
-    writeJson(OUTBOX_KEY, [...readOutbox(), item]);
-    return item;
+    return writeJson(OUTBOX_KEY, [...readOutbox(), item]) ? item : null;
 }
 
 function dropFromOutbox(id) {
@@ -1056,20 +1071,31 @@ function setupDragAndDrop() {
 
 async function loadModels() {
     let data = null;
-    let fromServer = false;
+    let reached = false;
     try {
         const response = await fetch(`${API_URL}/models`);
+        // A response arriving is what proves the server is there, whatever it
+        // says — the same evidence the send paths use. An error body is still an
+        // answer, so it clears the banner even though it is unusable below.
+        reached = true;
         data = await response.json();
-        fromServer = true;
-        writeJson(MODELS_KEY, data);
+        // ApiExceptionHandler serialises a failure as perfectly good JSON, so a
+        // 500 parses cleanly and the catch never runs. Caching that would poison
+        // the payload an offline cold start depends on, and leave data.models
+        // undefined — and this runs first in the boot chain, unguarded, so the
+        // throw would take restoreDraft and the outbox replay down with it.
+        if (response.ok && Array.isArray(data?.models)) writeJson(MODELS_KEY, data);
+        else data = readJson(MODELS_KEY);
     } catch (e) {
         // Offline cold start: the cached payload keeps the model rail usable and,
         // more importantly, gives a queued turn a model key to be replayed with.
         data = readJson(MODELS_KEY);
         console.warn('Could not reach /api/models; falling back to the cached payload:', e);
     }
-    setServerReachable(fromServer);
-    if (!data) return;
+    setServerReachable(reached);
+    // A cache written by an older build, or none at all, is no reason to strand
+    // the boot chain either.
+    if (!data || !Array.isArray(data.models)) return;
 
     models = data.models;
     effortLevels = data.effortLevels;
@@ -1260,11 +1286,18 @@ async function sendMessage() {
         // text bouncing back into the composer. Attachments are excluded: a File
         // can't be serialized into the queue.
         if (!fetchSettled && isNetworkFailure(error) && attachmentsSnapshot.length === 0 && message) {
-            userBubble.classList.add('pending');
-            userBubble._snapshot.outboxId = queueSend(body).id;
             setServerReachable(false);
-            saveDraftNow();
-            return;
+            // A queue that would not take the turn cannot replay it either, so the
+            // text falls through to the path below and goes back to the composer.
+            // Claiming it was queued would be the one way to lose it outright.
+            const queued = queueSend(body);
+            if (queued) {
+                userBubble.classList.add('pending');
+                userBubble._snapshot.outboxId = queued.id;
+                saveDraftNow();
+                return;
+            }
+            userBubble.remove();
         }
         // Re-enable any quiz buttons that were disabled before the failed send,
         // so the user can still pick an answer without losing the question.

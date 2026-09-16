@@ -524,3 +524,66 @@ test('a replay that never comes back does not wedge the queue for the session', 
     await expect.poll(() => outboxSize(page)).toBe(0);
     await expect(page.locator('.message.user.pending')).toHaveCount(0);
 });
+
+test('a turn the queue could not take comes back to the composer', async ({ page }) => {
+    const state = chatState();
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // localStorage.setItem throws on a full quota and in some private-storage
+    // modes. The queue is the only copy a pending turn has — its text left the
+    // composer the moment it was sent — so a write that did not land must not be
+    // reported back as "queued for replay".
+    await page.evaluate(() => {
+        const real = localStorage.setItem.bind(localStorage);
+        localStorage.setItem = (key, value) => {
+            if (key === 'coach.outbox') throw new DOMException('quota', 'QuotaExceededError');
+            real(key, value);
+        };
+    });
+
+    await send(page, 'primera');
+
+    // The older fallback path is exactly right for this: nothing can replay the
+    // turn, so the text goes back where the user can send it again.
+    await expect(page.locator('#chatInput')).toHaveValue('primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(0);
+    await expect(page.locator('.message.assistant').last()).toContainText('restored');
+    await expect.poll(() => outboxSize(page)).toBe(0);
+});
+
+test('an error body from /api/models is not cached and does not stop the boot', async ({ page }) => {
+    const state = chatState();
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    // Chat is reachable again, but /api/models answers 500 — and ApiExceptionHandler
+    // serialises that as perfectly good JSON, so response.json() resolves and the
+    // offline catch never runs. The boot chain is loadModels → loadConversations →
+    // restoreDraft → flushOutbox with nothing guarding it, so a throw in the first
+    // link takes the replay this PR exists for down with it.
+    await page.route('**/api/models', route => route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'boom' }),
+    }));
+    state.offline = false;
+    await page.reload();
+    await page.waitForLoadState('networkidle');
+
+    await expect.poll(() => state.posts.length).toBe(1);
+    await expect.poll(() => outboxSize(page)).toBe(0);
+    // The rail still comes up, because the last good payload was left in place.
+    await expect(page.locator('#modelButtons .model-button').first()).toBeVisible();
+    // And that is what a genuinely offline cold start would read next.
+    const cached = await page.evaluate(() => JSON.parse(localStorage.getItem('coach.models')));
+    expect(Array.isArray(cached.models)).toBe(true);
+});
