@@ -252,7 +252,16 @@ function saveDraftNow() {
     // would persist a pane the pending bubble is no longer in. The last coherent
     // snapshot is worth more than the newer text: only it can put the bubble back
     // for settleQueued to land the replayed answer on.
-    if (readOutbox().length && !messages.some(m => m.outboxId)) return;
+    // Some pending bubble is not enough. There is one draft slot, and two chats
+    // can each be holding a queued turn — a chat started offline while an earlier
+    // one's turn was still waiting. A pane that covers only its own turn would
+    // take the slot from the chat it does not cover, and that chat's bubble
+    // exists nowhere else: its turn could then never settle, never be handed
+    // back, and so never leave the outbox — which freezes this guard, and
+    // clearDraft with it, shut for the rest of the browser install.
+    const drawn = new Set(messages.map(m => m.outboxId));
+    const coversTheOutbox = readOutbox().every(item => drawn.has(item.id));
+    if (!coversTheOutbox) return;
     if (!messages.length && !chatInput.value) { clearDraft(); return; }
     writeJson(DRAFT_KEY, {
         savedAt: Date.now(),
@@ -390,6 +399,19 @@ function adoptMintedConversation(chatKey, conversationId, queued = null, minterI
     writeJson(OUTBOX_KEY, readOutbox().map(redirect));
 }
 
+/**
+ * How long a chat turn may hold the connection open before it is abandoned.
+ *
+ * Minutes, not seconds: no response headers arrive until the model has finished
+ * generating (server-side timeout is 5m). Shared by the direct send and the
+ * replay drain, because a half-open socket — a phone moving from WiFi to
+ * cellular — strands either one the same way. A function rather than a constant
+ * so the e2e suite can shrink it and watch the timer fire.
+ */
+function turnTimeoutMs() {
+    return 6 * 60 * 1000;
+}
+
 // fetch() rejects with a TypeError when the request never left the device or the
 // host couldn't be resolved. A timeout arrives as an AbortError and a rejection
 // from the server as our own Error — both may have been processed already, so
@@ -424,11 +446,20 @@ async function flushOutbox() {
             // failure says nothing about whether the server is reachable, so it
             // must not stop the drain or flip the UI offline.
             let delivered = false;
+            // `flushing` is held for the whole of this await, and every other way
+            // into the drain — `online`, `visibilitychange`, the next successful
+            // send — short-circuits on it. A socket that goes half-open would
+            // therefore wedge the queue for the rest of the session while the
+            // banner kept promising the send would resume, so the replay takes
+            // the same deadline the direct send does.
+            const controller = new AbortController();
+            const abortTimer = setTimeout(() => controller.abort(), turnTimeoutMs());
             try {
                 const response = await fetch(`${API_URL}/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(item.body),
+                    signal: controller.signal,
                 });
                 const data = await response.json().catch(() => ({}));
                 delivered = true;
@@ -451,8 +482,14 @@ async function flushOutbox() {
                     console.warn('A replayed answer could not be rendered:', e);
                     continue;
                 }
+                // An abort lands here too, and wants the same treatment a dropped
+                // connection gets: the turn stays queued, the drain stops, and the
+                // banner says so. Its clientTurnId is what stops the retry from
+                // double-posting a turn the server did take.
                 setServerReachable(false);
                 break;
+            } finally {
+                clearTimeout(abortTimer);
             }
         }
     } finally {
@@ -1154,9 +1191,9 @@ async function sendMessage() {
     };
     const payload = JSON.stringify(body);
 
-    // Abort if the server doesn't respond within 6 minutes (server-side timeout is 5m).
+    // Abort if the server doesn't respond in time; see turnTimeoutMs.
     const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+    const abortTimer = setTimeout(() => controller.abort(), turnTimeoutMs());
 
     // The try below also wraps parsing and rendering the answer, and a TypeError
     // from there (a malformed question reaching buildQuizBlock, say) is

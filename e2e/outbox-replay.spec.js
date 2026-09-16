@@ -26,6 +26,9 @@ async function routeDefaults(page) {
 async function routeChat(page, state) {
     await page.route('**/api/chat', async route => {
         if (state.offline) return route.abort('failed');
+        // A half-open socket — the phone moved from WiFi to cellular and nothing
+        // ever comes back. Not an abort: the request simply never settles.
+        if (state.hang) return new Promise(() => {});
         const body = JSON.parse(route.request().postData());
         state.posts.push(body);
         // The window can close again mid-drain: after this many posts the host is
@@ -444,6 +447,78 @@ test('a render failure after a delivered answer is not queued for replay', async
     await page.waitForLoadState('networkidle');
 
     await send(page, 'primera');
+
+    await expect.poll(() => state.posts.length).toBe(1);
+    await expect.poll(() => outboxSize(page)).toBe(0);
+    await expect(page.locator('.message.user.pending')).toHaveCount(0);
+});
+
+test('a turn queued in a second chat does not bury the first chat\'s queued one', async ({ page }) => {
+    const state = chatState({ status: 400, errorMessage: 'Model no longer available' });
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+    // A second chat started while still offline queues a turn of its own, and
+    // there is only one draft slot. It already holds the only copy of 'primera''s
+    // pending bubble — the thing settleQueued and failQueued both find the turn
+    // by — so a snapshot of this pane must not be allowed to take its place.
+    await page.click('#newChatButton');
+    await send(page, 'segunda');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    // 'segunda' is on screen, so its rejection comes straight back to the composer.
+    await expect(page.locator('#chatInput')).toHaveValue('segunda');
+    // 'primera' was not, so it stays queued until its own chat is back.
+    await expect.poll(() => outboxSize(page)).toBe(1);
+
+    // And the draft is the only way that chat can come back. Lose it and
+    // 'primera' can never be drawn again — so it can never leave the outbox
+    // either, which freezes every later draft save behind the same guard and
+    // leaves the banner stuck on 'rejected' for good.
+    await page.reload();
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('#chatInput')).toHaveValue('primera');
+    await expect.poll(() => outboxSize(page)).toBe(0);
+    await expect(page.locator('#offlineBanner')).toBeHidden();
+    expect(state.posts.map(p => p.message)).toEqual(['primera', 'segunda']);
+});
+
+test('a replay that never comes back does not wedge the queue for the session', async ({ page }) => {
+    const state = chatState();
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    // The real limit is minutes, because a chat turn holds the connection open
+    // for the whole generation window. The seam is the same one sendMessage uses,
+    // shrunk so the test can watch the timer fire instead of waiting it out.
+    await page.evaluate(() => { window.turnTimeoutMs = () => 100; });
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    // The server is "back", but this replay's socket is half-open: no response,
+    // no rejection, nothing. `flushing` is held for the whole await, so without a
+    // timeout every later drain — `online`, `visibilitychange`, the next
+    // successful send — short-circuits on it for the rest of the session.
+    state.offline = false;
+    state.hang = true;
+    await page.evaluate(() => window.flushOutbox());
+
+    await expect(page.locator('#offlineBanner')).toContainText('Offline');
+    await expect.poll(() => outboxSize(page)).toBe(1);
+
+    state.hang = false;
+    await page.evaluate(() => window.flushOutbox());
 
     await expect.poll(() => state.posts.length).toBe(1);
     await expect.poll(() => outboxSize(page)).toBe(0);
