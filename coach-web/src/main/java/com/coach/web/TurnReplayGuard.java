@@ -21,9 +21,9 @@ import java.util.function.Supplier;
  * generation window, since no response headers arrive until the model is done.
  * The offline outbox therefore replays turns the server may already have taken.
  * Each turn carries a client-generated id; the first request to arrive with a
- * given id owns it, and a later one is served that first run's answer rather
- * than appending the turn again — or, for a chat that had no id yet, minting a
- * second conversation for it.
+ * given id and conversation owns it, and a later one is served that first run's
+ * answer rather than appending the turn again — or, for a chat that had no id
+ * yet, minting a second conversation for it.
  *
  * <p>In memory only, like {@link com.coach.word.WordSetStore}: this closes the
  * window between a dropped connection and its replay, not a server restart. A
@@ -36,21 +36,33 @@ public class TurnReplayGuard {
     private static final long TTL_SECONDS = 3600;
     private static final int MAX_SIZE = 500;
 
-    private final ConcurrentHashMap<String, Turn> turns = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<TurnKey, Turn> turns = new ConcurrentHashMap<>();
+
+    private record TurnKey(String turnId, String conversationId) { }
 
     private record Turn(Instant started, CompletableFuture<ChatResponse> answer) { }
 
     /**
-     * Run {@code handler} once per {@code turnId}, serving any repeat of that id
-     * the same answer. A blank id opts out: the turn is simply handled.
+     * Run {@code handler} once per turn, serving any repeat of that turn the same
+     * answer. A blank {@code turnId} opts out: the turn is simply handled.
+     *
+     * <p>A turn is its id <em>and</em> the conversation it asked to join, because
+     * the client can legitimately change the latter: a turn queued before its chat
+     * had an id gets one written into it as soon as any turn of that chat lands
+     * (adoptMintedConversation), and that rewrite is the client saying where the
+     * turn now belongs. Answering on the id alone would hand back the conversation
+     * the first run minted — which the client then adopts as the open chat, so the
+     * message it really did deliver elsewhere drops out of the model's context and
+     * one chat ends up split across two conversations.
      */
-    public ChatResponse once(String turnId, Supplier<ChatResponse> handler) {
+    public ChatResponse once(String turnId, String conversationId, Supplier<ChatResponse> handler) {
         if (!StringUtils.hasText(turnId)) return handler.get();
         evictExpired();
         if (turns.size() >= MAX_SIZE) evictOldest();
 
+        var key = new TurnKey(turnId, conversationId);
         var mine = new Turn(Instant.now(), new CompletableFuture<>());
-        var owner = turns.putIfAbsent(turnId, mine);
+        var owner = turns.putIfAbsent(key, mine);
         if (owner != null) return await(owner);
 
         try {
@@ -61,7 +73,7 @@ public class TurnReplayGuard {
             // The controller rolls its user turn back on a failure, so nothing was
             // persisted and the id must go too — otherwise the retry the client is
             // entitled to would be answered with this failure for an hour.
-            turns.remove(turnId);
+            turns.remove(key);
             mine.answer().completeExceptionally(e);
             throw e;
         }

@@ -72,7 +72,7 @@ public class ChatController {
     /** Text-only chat turn (JSON body) — the original contract, unchanged. */
     @PostMapping(value = "/chat", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ChatResponse chat(@Valid @RequestBody ChatRequest request) {
-        return replayGuard.once(request.clientTurnId(), () -> handle(request, List.of()));
+        return replayGuard.once(request.clientTurnId(), request.conversationId(), () -> handle(request, List.of()));
     }
 
     /** Chat turn with file attachments (multipart): a JSON {@code request} part + {@code files}. */
@@ -80,7 +80,7 @@ public class ChatController {
     public ChatResponse chatMultipart(@Valid @RequestPart("request") ChatRequest request,
                                       @RequestPart(value = "files", required = false) MultipartFile[] files) {
         List<MultipartFile> parts = files == null ? List.of() : List.of(files);
-        return replayGuard.once(request.clientTurnId(), () -> handle(request, parts));
+        return replayGuard.once(request.clientTurnId(), request.conversationId(), () -> handle(request, parts));
     }
 
     private ChatResponse handle(ChatRequest request, List<MultipartFile> files) {

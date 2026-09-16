@@ -885,6 +885,32 @@ class ChatApiTest {
     }
 
     @Test
+    void aReplayRedirectedToAnotherConversationIsNotServedTheOldAnswer() throws IOException {
+        queueText("uno");
+        queueText("dos");
+        queueText("tres");
+        Map<String, Object> opener = chatBody("hola", "sonnet-4-6", null, null);
+        opener.put("clientTurnId", "redirected-turn");
+        String stranded = json(postChat(opener)).get("conversationId").asText();
+
+        // The client never learned of that mint — the answer was lost on the way
+        // back — so it went on to start a conversation of its own and only then
+        // replayed the turn, into that one.
+        String adopted = json(postChat(chatBody("directa", "sonnet-4-6", null, null)))
+                .get("conversationId").asText();
+        Map<String, Object> replay = chatBody("hola", "sonnet-4-6", null, adopted);
+        replay.put("clientTurnId", "redirected-turn");
+
+        JsonNode resp = json(postChat(replay));
+
+        // Answering on the id alone would hand back a conversation the client
+        // never asked for, and it would repoint the whole chat at it.
+        assertThat(stranded).isNotEqualTo(adopted);
+        assertThat(resp.get("conversationId").asText()).isEqualTo(adopted);
+        assertThat(Files.readAllLines(CONV_DIR.resolve(adopted + ".jsonl"))).hasSize(4);
+    }
+
+    @Test
     void aFailedTurnIsNotRememberedAsAnAnswer() {
         doThrow(new RuntimeException("upstream boom")).when(gateway).createMessage(any(), anyInt(), any(), any(), any());
         Map<String, Object> body = chatBody("hola", "sonnet-4-6", null, null);

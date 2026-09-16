@@ -194,7 +194,12 @@ see the fix.
   the same TypeError whether the request never left or the response did), so a turn may
   arrive twice; the optional `clientTurnId` on `ChatRequest` identifies it, and a repeat
   is served the first run's `ChatResponse` instead of appending the turn (or minting a
-  conversation) again. In-memory `ConcurrentHashMap` of `CompletableFuture`s, TTL 60 min,
+  conversation) again. The key is `clientTurnId` **plus `conversationId`**, not the id
+  alone: the client rewrites a queued turn's `conversationId` when its chat is minted
+  elsewhere (`adoptMintedConversation`), and that rewrite means "this turn belongs
+  there now" — replaying the first run's answer would repoint the open chat at the
+  conversation that run minted and split one chat in two. In-memory
+  `ConcurrentHashMap` of `CompletableFuture`s, TTL 60 min,
   max 500 — same ephemeral shape as `WordSetStore`: a replay arriving while the first is
   still generating waits on it, a failed turn forgets its id so the retry goes through,
   and a restart forgets everything. A blank/absent id opts out.
