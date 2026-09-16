@@ -239,6 +239,14 @@ function saveDraftNow() {
     clearTimeout(draftTimer);
     if (!chatMessages) return;
     const messages = snapshotMessages();
+    // The same refusal clearDraft makes, against the other way the snapshot can
+    // lose an undelivered turn: not a delete but an overwrite. resetToSetup empties
+    // the pane for 字 / a topic grid / the noam shell, and the next save — the
+    // welcome bubble's deferred one, or the first keystroke in the composer —
+    // would persist a pane the pending bubble is no longer in. The last coherent
+    // snapshot is worth more than the newer text: only it can put the bubble back
+    // for settleQueued to land the replayed answer on.
+    if (readOutbox().length && !messages.some(m => m.outboxId)) return;
     if (!messages.length && !chatInput.value) { clearDraft(); return; }
     writeJson(DRAFT_KEY, {
         savedAt: Date.now(),
@@ -350,6 +358,27 @@ function dropFromOutbox(id) {
     writeJson(OUTBOX_KEY, readOutbox().filter(i => i.id !== id));
 }
 
+/**
+ * Hand a conversation minted mid-drain to the turns still queued behind it, in
+ * memory and on disk. Holding it only in a variable local to the drain loses it
+ * the moment the drain stops early: the next flushOutbox would post the rest of
+ * that chat with conversationId: null and mint a second server conversation for
+ * what the user sees as one chat.
+ */
+function adoptMintedConversation(queued, minter, conversationId) {
+    if (!conversationId) return;
+    const redirect = item => {
+        if (item.id === minter.id || item.chatKey !== minter.chatKey || item.body.conversationId) return item;
+        // coachType/topic is how a turn asks to *start* a coach chat, and the
+        // server refuses it next to a conversationId ("coachType can only be set
+        // when starting a new chat"). That chat exists now, so only the id stays.
+        const { coachType, topic, ...body } = item.body;
+        return { ...item, body: { ...body, conversationId } };
+    };
+    queued.forEach((item, i) => { queued[i] = redirect(item); });
+    writeJson(OUTBOX_KEY, readOutbox().map(redirect));
+}
+
 // fetch() rejects with a TypeError when the request never left the device or the
 // host couldn't be resolved. A timeout arrives as an AbortError and a rejection
 // from the server as our own Error — both may have been processed already, so
@@ -372,16 +401,8 @@ async function flushOutbox() {
     const items = readOutbox();
     if (!items.length) return;
     flushing = true;
-    // Turns queued before their chat existed have no conversationId; the first one
-    // to land mints it, and every later turn from that same chat must be redirected
-    // into it rather than minting a conversation of its own.
-    const mintedByChat = new Map();
     try {
         for (const item of items) {
-            const minted = mintedByChat.get(item.chatKey);
-            const body = item.body.conversationId || !minted
-                ? item.body
-                : { ...item.body, conversationId: minted };
             // settleQueued renders, and a malformed answer can throw from there —
             // long after the turn was delivered and dropped from the queue. Same
             // distinction sendMessage draws with its own flag: past this point a
@@ -392,13 +413,16 @@ async function flushOutbox() {
                 const response = await fetch(`${API_URL}/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
+                    body: JSON.stringify(item.body),
                 });
                 const data = await response.json().catch(() => ({}));
                 delivered = true;
+                // The server answered, whatever it answered — so the banner must
+                // stop claiming it is unreachable.
+                setServerReachable(true);
                 if (response.ok) {
                     dropFromOutbox(item.id);
-                    if (!body.conversationId) mintedByChat.set(item.chatKey, data.conversationId);
+                    if (!item.body.conversationId) adoptMintedConversation(items, item, data.conversationId);
                     settleQueued(item, data);
                 } else {
                     // Terminal: a rejection will not become an acceptance on retry,
@@ -456,6 +480,11 @@ function settleQueued(item, data) {
     bubble.classList.remove('pending');
     delete bubble._snapshot.outboxId;
     currentConversationId = data.conversationId;
+    // A coach-first turn takes its setup screen down with it, exactly as
+    // sendMessage's own success path does and for the same reason: the chat it
+    // asked for exists now, so the next message must not resend coachType/topic
+    // alongside the id it just minted.
+    if (item.body.coachType) { activeSetup = null; selectedTopic = null; }
     // addMessage always appends, but the later queued turns' bubbles are already
     // mounted below this one — so the answer is moved up under the turn it
     // answers, which is also the order snapshotMessages then persists.
@@ -1111,6 +1140,10 @@ async function sendMessage() {
             });
         }
         fetchSettled = true;
+        // A phone that left the LAN but kept cellular never fires `online`
+        // (navigator.onLine stays true), so a response arriving is the only thing
+        // that can clear a banner an earlier failed send put up.
+        setServerReachable(true);
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             throw new Error(err.message || 'Request failed');

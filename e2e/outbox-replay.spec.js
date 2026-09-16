@@ -28,11 +28,23 @@ async function routeChat(page, state) {
         if (state.offline) return route.abort('failed');
         const body = JSON.parse(route.request().postData());
         state.posts.push(body);
+        // The window can close again mid-drain: after this many posts the host is
+        // unreachable once more, so the rest of the queue stays queued.
+        if (state.offlineAfter && state.posts.length >= state.offlineAfter) state.offline = true;
         if (state.status && state.status !== 200)
             return route.fulfill({
                 status: state.status,
                 contentType: 'application/json',
                 body: JSON.stringify({ message: state.errorMessage || 'Rejected' }),
+            });
+        // ChatController.handle refuses coachType next to a conversationId
+        // ("coachType can only be set when starting a new chat") — a replay that
+        // keeps both has to fail here the way it fails against the real server.
+        if (body.coachType && body.conversationId)
+            return route.fulfill({
+                status: 400,
+                contentType: 'application/json',
+                body: JSON.stringify({ message: 'coachType can only be set when starting a new chat' }),
             });
         const conversationId = body.conversationId || `conv-${++state.minted}`;
         await route.fulfill({
@@ -40,6 +52,21 @@ async function routeChat(page, state) {
             body: JSON.stringify({ conversationId, answer: `respuesta a ${body.message}`, ...state.extra }),
         });
     });
+}
+
+async function routeSpanishTopics(page) {
+    await page.route('**/api/coaches/spanish/topics', route =>
+        route.fulfill({
+            contentType: 'application/json',
+            body: JSON.stringify([{ level: 'A1', topics: ['viajes'] }]),
+        })
+    );
+}
+
+/** Open the Español setup screen and pick its one topic, so real turns can be sent. */
+async function pickSpanishTopic(page) {
+    await page.click('input[name="coach"][value="spanish"]');
+    await page.click('#topicGrid .topic-button');
 }
 
 function chatState(overrides = {}) {
@@ -247,6 +274,116 @@ test('a rejected replay does not overwrite a draft typed while it waited', async
 
     await expect(page.locator('.message.assistant').last()).toContainText('Model no longer available');
     await expect(page.locator('#chatInput')).toHaveValue('primera\n\notra cosa');
+});
+
+test('a delivery clears the offline banner without waiting for an online event', async ({ page }) => {
+    const state = chatState();
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await expect(page.locator('#offlineBanner')).toContainText('Offline');
+
+    // A phone that leaves the server's Wi-Fi but keeps cellular never fires
+    // `online` — navigator.onLine stays true — so a send that succeeds is the
+    // only evidence the server is back. First a direct one, then the drain.
+    state.offline = false;
+    await send(page, 'segunda');
+    await expect(page.locator('#offlineBanner')).toHaveText('⏳ 1 message queued — sending…');
+
+    await page.evaluate(() => window.flushOutbox());
+    await expect(page.locator('#offlineBanner')).toBeHidden();
+});
+
+test('a second queued turn of an unminted coach chat joins the chat the first one made', async ({ page }) => {
+    const state = chatState();
+    await routeDefaults(page);
+    await routeChat(page, state);
+    await routeSpanishTopics(page);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Español is the one setup that sends real turns from its own screen, and
+    // activeSetup only clears when an answer arrives — so both of these queue
+    // with coachType/topic and no conversationId.
+    await pickSpanishTopic(page);
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+    await send(page, 'segunda');
+    await expect(page.locator('.message.user.pending')).toHaveCount(2);
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    await expect.poll(() => state.posts.length).toBe(2);
+    expect(state.minted).toBe(1);
+    // Inheriting the id is not enough: the request that asked to *start* the chat
+    // already succeeded, so coachType/topic must come off with it.
+    expect(state.posts[1].conversationId).toBe('conv-1');
+    expect(state.posts[1].coachType).toBeUndefined();
+    expect(state.posts[1].topic).toBeUndefined();
+    await expect(page.locator('.message.user.pending')).toHaveCount(0);
+});
+
+test('the message after a replayed coach-first turn stays in the same conversation', async ({ page }) => {
+    const state = chatState();
+    await routeDefaults(page);
+    await routeChat(page, state);
+    await routeSpanishTopics(page);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await pickSpanishTopic(page);
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+    await expect(page.locator('.message.user.pending')).toHaveCount(0);
+
+    // The replay landed the opening turn, so the setup screen is spent — exactly
+    // as it would be had the send succeeded first time. Typing again must not
+    // re-ask for a new coach chat on top of the id the replay just adopted.
+    await send(page, 'segunda');
+
+    await expect.poll(() => state.posts.length).toBe(2);
+    expect(state.posts[1].conversationId).toBe('conv-1');
+    expect(state.posts[1].coachType).toBeUndefined();
+    await expect(page.locator('.message.assistant').last()).toContainText('respuesta a segunda');
+});
+
+test('a conversation minted mid-drain survives the drain stopping', async ({ page }) => {
+    const state = chatState({ offlineAfter: 1 });
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await send(page, 'segunda');
+    await expect(page.locator('.message.user.pending')).toHaveCount(2);
+
+    // The window shuts again right after turn 1 lands: the drain breaks with turn
+    // 2 still queued, and the id turn 1 minted is only in this drain's own Map.
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+    await expect.poll(() => state.posts.length).toBe(1);
+    await expect.poll(() => outboxSize(page)).toBe(1);
+
+    state.offlineAfter = 0;
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    await expect.poll(() => state.posts.length).toBe(2);
+    // One chat the user never left may not become two server conversations.
+    expect(state.minted).toBe(1);
+    expect(state.posts[1].conversationId).toBe('conv-1');
 });
 
 test('a render failure after a delivered answer is not queued for replay', async ({ page }) => {

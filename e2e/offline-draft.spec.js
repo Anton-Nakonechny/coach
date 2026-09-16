@@ -78,6 +78,11 @@ test('entering a setup screen keeps an undelivered turn recoverable', async ({ p
     // in the outbox, so its bubble snapshot must survive too — without it the
     // next flush has nothing to settle the answer onto and drops it silently.
     await page.click('button.mode-btn[data-mode="documents"]');
+    // The noam shell posts no bubble of its own, so nothing schedules a save
+    // until the user types — and then the snapshot is of a pane the pending
+    // bubble is no longer in. clearDraft's refusal doesn't cover that: this
+    // overwrites the key rather than removing it.
+    await page.fill('#chatInput', 'otra cosa');
     await page.evaluate(() => window.saveDraftNow());
 
     const draft = await readDraft(page);
@@ -85,6 +90,38 @@ test('entering a setup screen keeps an undelivered turn recoverable', async ({ p
     expect(draft.messages.some(m => m.content === 'primera' && m.outboxId)).toBe(true);
 
     // Reload offline: the pending bubble comes back and the replayed answer lands.
+    await page.reload();
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    await expect(page.locator('.message.assistant').last()).toContainText('respuesta a primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(0);
+});
+
+test('a setup screen that posts its own bubble still keeps an undelivered turn', async ({ page }) => {
+    const state = { offline: true, posts: [] };
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    // 字 wipes the pane and adds its own welcome bubble, whose deferred save
+    // rewrites the draft 300 ms later with no hand on the keyboard — the same
+    // overwrite the noam shell needs a keystroke for.
+    await page.click('button.mode-btn[data-mode="words"]');
+    await expect(page.locator('.message.assistant').last()).toContainText('字');
+    await page.waitForTimeout(500);
+
+    const draft = await readDraft(page);
+    expect(draft.messages.some(m => m.content === 'primera' && m.outboxId)).toBe(true);
+
     await page.reload();
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.message.user.pending')).toHaveCount(1);
