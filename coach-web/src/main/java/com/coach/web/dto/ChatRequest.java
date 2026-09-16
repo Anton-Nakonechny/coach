@@ -11,7 +11,9 @@ import com.coach.model.ModelKey;
  * be omitted; the controller substitutes the configured defaults. {@code conversationId}
  * is null for a fresh conversation. {@code coachType} (null → {@link CoachType#NONE})
  * may only be set when starting a new chat with a blank message — the backend supplies
- * the opening instruction itself.
+ * the opening instruction itself. {@code clientTurnId} is optional: when present it
+ * identifies this turn across the offline outbox's replays, so a turn the server
+ * already took is recognised instead of taken twice (see {@code TurnReplayGuard}).
  */
 public record ChatRequest(
         String message,
@@ -19,5 +21,6 @@ public record ChatRequest(
         String effort,
         String conversationId,
         CoachType coachType,
-        String topic
+        String topic,
+        String clientTurnId
 ) { }

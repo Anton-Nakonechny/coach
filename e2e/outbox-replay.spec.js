@@ -105,6 +105,13 @@ test('two turns queued before any mint replay into one conversation', async ({ p
     expect(state.minted).toBe(1);
     expect(state.posts[1].conversationId).toBe('conv-1');
     await expect(page.locator('.message.user.pending')).toHaveCount(0);
+    // A replay can reach a server that already took the turn — the connection can
+    // drop after the request lands and before the answer comes back — so every
+    // turn carries its own id for the server to recognise it by.
+    expect(state.posts[0].clientTurnId).toBeTruthy();
+    expect(state.posts[1].clientTurnId).not.toBe(state.posts[0].clientTurnId);
+    // The drain proved the server is reachable, so the banner comes down with it.
+    await expect(page.locator('#offlineBanner')).toBeHidden();
 });
 
 test('a new chat started offline does not merge into the previous chat', async ({ page }) => {
@@ -276,7 +283,7 @@ test('a rejected replay does not overwrite a draft typed while it waited', async
     await expect(page.locator('#chatInput')).toHaveValue('primera\n\notra cosa');
 });
 
-test('a delivery clears the offline banner without waiting for an online event', async ({ page }) => {
+test('a successful direct send clears the banner and drains what was queued', async ({ page }) => {
     const state = chatState();
     await routeDefaults(page);
     await routeChat(page, state);
@@ -288,14 +295,53 @@ test('a delivery clears the offline banner without waiting for an online event',
     await expect(page.locator('#offlineBanner')).toContainText('Offline');
 
     // A phone that leaves the server's Wi-Fi but keeps cellular never fires
-    // `online` — navigator.onLine stays true — so a send that succeeds is the
-    // only evidence the server is back. First a direct one, then the drain.
+    // `online` — navigator.onLine stays true — so nothing but a send that
+    // succeeds can prove the server came back. It has to do the whole job: clear
+    // the banner and move the queue. A turn left sitting there would mint a
+    // second conversation for this same chat whenever it finally went out.
     state.offline = false;
     await send(page, 'segunda');
-    await expect(page.locator('#offlineBanner')).toHaveText('⏳ 1 message queued — sending…');
 
-    await page.evaluate(() => window.flushOutbox());
+    await expect.poll(() => state.posts.length).toBe(2);
+    expect(state.minted).toBe(1);
+    expect(state.posts[1].message).toBe('primera');
+    expect(state.posts[1].conversationId).toBe('conv-1');
+    await expect.poll(() => outboxSize(page)).toBe(0);
     await expect(page.locator('#offlineBanner')).toBeHidden();
+});
+
+test('a replay rejected while its own chat is off screen does not land in another one', async ({ page }) => {
+    const state = chatState({ status: 400, errorMessage: 'Model no longer available' });
+    await routeDefaults(page);
+    await routeChat(page, state);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await send(page, 'primera');
+    await expect(page.locator('.message.user.pending')).toHaveCount(1);
+
+    // The drain awaits a full round-trip per item and runs on `online` /
+    // `visibilitychange` — exactly when a user is moving around — so a rejection
+    // can arrive with a different chat on screen. That chat must not be offered
+    // someone else's text under a "press Enter to send again".
+    await page.click('#newChatButton');
+    state.offline = false;
+    await page.evaluate(() => window.flushOutbox());
+
+    await expect(page.locator('#offlineBanner')).toContainText('rejected');
+    await expect(page.locator('#chatInput')).toHaveValue('');
+    await expect(page.locator('.message.assistant').last()).toContainText('New chat');
+
+    // Misplacing it is not the only failure available: it must not be destroyed
+    // either. It stays queued — never sent again — until the chat it came from
+    // is back on screen, which is what a reload brings.
+    await page.reload();
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('#chatInput')).toHaveValue('primera');
+    await expect(page.locator('.message.assistant').last()).toContainText('Model no longer available');
+    await expect.poll(() => outboxSize(page)).toBe(0);
+    expect(state.posts).toHaveLength(1);
 });
 
 test('a second queued turn of an unminted coach chat joins the chat the first one made', async ({ page }) => {

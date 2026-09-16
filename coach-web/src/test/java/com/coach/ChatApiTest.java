@@ -71,6 +71,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -833,6 +834,69 @@ class ChatApiTest {
     // ----------------------------------------------------------------------- //
     // Error handling
     // ----------------------------------------------------------------------- //
+
+    // ----------------------------------------------------------------------- //
+    // Replayed turns (offline outbox)
+    // ----------------------------------------------------------------------- //
+
+    /**
+     * A dropped connection is indistinguishable, client-side, from one that never
+     * opened: {@code fetch()} rejects with the same TypeError whether the request
+     * was never sent or the answer was lost on the way back. The client therefore
+     * replays turns the server may already have taken, and the turn id is how the
+     * server recognises the second copy.
+     */
+    @Test
+    void aReplayedTurnIsAnsweredOnceAndPersistedOnce() throws IOException {
+        queueText("first answer");
+        queueText("an answer that must never be handed out");
+        Map<String, Object> body = chatBody("hola", "sonnet-4-6", null, null);
+        body.put("clientTurnId", "replayed-turn");
+
+        JsonNode first = json(postChat(body));
+        ResponseEntity<String> replay = postChat(body);
+
+        assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.OK);
+        String cid = first.get("conversationId").asText();
+        assertThat(json(replay).get("conversationId").asText()).isEqualTo(cid);
+        assertThat(json(replay).get("answer").asText()).isEqualTo("first answer");
+        assertThat(gatewayCalls).hasSize(1);
+        assertThat(Files.readAllLines(CONV_DIR.resolve(cid + ".jsonl"))).hasSize(2);
+        assertThat(CONV_DIR.toFile().list()).hasSize(1);
+    }
+
+    @Test
+    void onlyAMatchingTurnIdCountsAsAReplay() throws IOException {
+        queueText("uno");
+        queueText("dos");
+        queueText("tres");
+        Map<String, Object> first = chatBody("hola", "sonnet-4-6", null, null);
+        first.put("clientTurnId", "distinct-turn-1");
+        String cid = json(postChat(first)).get("conversationId").asText();
+
+        Map<String, Object> second = chatBody("otra vez", "sonnet-4-6", null, cid);
+        second.put("clientTurnId", "distinct-turn-2");
+        postChat(second);
+        // No id at all is the older contract, and every such turn is its own.
+        postChat(chatBody("y otra", "sonnet-4-6", null, cid));
+
+        assertThat(gatewayCalls).hasSize(3);
+        assertThat(Files.readAllLines(CONV_DIR.resolve(cid + ".jsonl"))).hasSize(6);
+    }
+
+    @Test
+    void aFailedTurnIsNotRememberedAsAnAnswer() {
+        doThrow(new RuntimeException("upstream boom")).when(gateway).createMessage(any(), anyInt(), any(), any(), any());
+        Map<String, Object> body = chatBody("hola", "sonnet-4-6", null, null);
+        body.put("clientTurnId", "failed-turn");
+
+        assertThat(postChat(body).getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+
+        // The turn was never answered, so the id must not stand in the way of the
+        // retry the client is entitled to make.
+        assertThat(postChat(body).getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        verify(gateway, times(2)).createMessage(any(), anyInt(), any(), any(), any());
+    }
 
     @Test
     void unknownModelReturns400() {

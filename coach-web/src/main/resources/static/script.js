@@ -213,8 +213,14 @@ let flushing = false;
 // and only to those.
 let pendingChatKey = newChatKey();
 
+// crypto.randomUUID() needs a secure context, which this plain-http LAN origin
+// is not; time plus a little entropy is enough for ids only this device mints.
+function newId() {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function newChatKey() {
-    return `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return `pending-${newId()}`;
 }
 
 function readJson(key) {
@@ -345,7 +351,7 @@ function readOutbox() {
 
 function queueSend(body) {
     const item = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        id: newId(),
         queuedAt: Date.now(),
         chatKey: body.conversationId || pendingChatKey,
         body,
@@ -359,23 +365,28 @@ function dropFromOutbox(id) {
 }
 
 /**
- * Hand a conversation minted mid-drain to the turns still queued behind it, in
- * memory and on disk. Holding it only in a variable local to the drain loses it
- * the moment the drain stops early: the next flushOutbox would post the rest of
- * that chat with conversationId: null and mint a second server conversation for
- * what the user sees as one chat.
+ * Hand a freshly minted conversation to the turns of that same chat still
+ * waiting in the queue, on disk and — during a drain — in the list being
+ * iterated. Holding the id only in a variable loses it the moment the drain
+ * stops early or the mint happens on a direct send instead: the next flush would
+ * post the rest of that chat with conversationId: null and mint a second server
+ * conversation for what the user sees as one chat.
+ *
+ * `queued` is the drain's own in-memory copy (already read before the loop) and
+ * `minterId` the item that did the minting, since it has left the stored queue
+ * but not that copy.
  */
-function adoptMintedConversation(queued, minter, conversationId) {
+function adoptMintedConversation(chatKey, conversationId, queued = null, minterId = null) {
     if (!conversationId) return;
     const redirect = item => {
-        if (item.id === minter.id || item.chatKey !== minter.chatKey || item.body.conversationId) return item;
+        if (item.id === minterId || item.chatKey !== chatKey || item.body.conversationId) return item;
         // coachType/topic is how a turn asks to *start* a coach chat, and the
         // server refuses it next to a conversationId ("coachType can only be set
         // when starting a new chat"). That chat exists now, so only the id stays.
         const { coachType, topic, ...body } = item.body;
         return { ...item, body: { ...body, conversationId } };
     };
-    queued.forEach((item, i) => { queued[i] = redirect(item); });
+    if (queued) queued.forEach((item, i) => { queued[i] = redirect(item); });
     writeJson(OUTBOX_KEY, readOutbox().map(redirect));
 }
 
@@ -403,6 +414,10 @@ async function flushOutbox() {
     flushing = true;
     try {
         for (const item of items) {
+            // A turn the server already refused is never sent again. It is still
+            // here because the chat it came from was off screen when the refusal
+            // arrived; every drain is another chance to hand its text back.
+            if (item.rejected) { failQueued(item, new Error(item.rejected)); continue; }
             // settleQueued renders, and a malformed answer can throw from there —
             // long after the turn was delivered and dropped from the queue. Same
             // distinction sendMessage draws with its own flag: past this point a
@@ -422,13 +437,13 @@ async function flushOutbox() {
                 setServerReachable(true);
                 if (response.ok) {
                     dropFromOutbox(item.id);
-                    if (!item.body.conversationId) adoptMintedConversation(items, item, data.conversationId);
+                    if (!item.body.conversationId)
+                        adoptMintedConversation(item.chatKey, data.conversationId, items, item.id);
                     settleQueued(item, data);
                 } else {
                     // Terminal: a rejection will not become an acceptance on retry,
-                    // so the item leaves the queue here too — but only after its text
-                    // has been handed back, never silently destroyed.
-                    dropFromOutbox(item.id);
+                    // so this turn is done being sent — but its text is never
+                    // silently destroyed, which is failQueued's whole job.
                     failQueued(item, new Error(data.message || 'A queued message was rejected'));
                 }
             } catch (e) {
@@ -455,22 +470,31 @@ function pendingBubble(item) {
 
 /**
  * A replayed turn the server refused. The text lives nowhere else by now — the
- * composer was cleared when it was queued — so put it back the way sendMessage's
- * own non-network failure does, instead of leaving a dashed bubble that can never
- * resolve.
+ * composer was cleared when it was queued — so it has to come back to the user,
+ * and to the right chat: `chatInput` and `chatMessages` are whatever pane is
+ * mounted, which during a drain need not be the one this turn came from. Its own
+ * bubble being on screen is the proof that it is, exactly as settleQueued reads
+ * that same signal. Otherwise the turn stays queued — never sent again, but
+ * still holding its chat's draft snapshot open — until that chat is back.
  */
 function failQueued(item, error) {
     const bubble = pendingBubble(item);
-    if (bubble) bubble.remove();
-    // The composer stayed free while this turn waited, so it may already hold a
-    // newer draft. Both texts exist nowhere else, so the rejected one goes in
-    // above the draft rather than over it.
-    const typed = chatInput.value;
-    chatInput.value = typed ? `${item.body.message}\n\n${typed}` : item.body.message;
-    autoResize();
-    addError(error, typed
-        ? ' Retry: your message has been restored above the draft you were typing — edit and press Enter.'
-        : ' Retry: your message has been restored — press Enter to send again.');
+    if (bubble) {
+        dropFromOutbox(item.id);
+        bubble.remove();
+        // The composer stayed free while this turn waited, so it may already hold
+        // a newer draft. Both texts exist nowhere else, so the rejected one goes
+        // in above the draft rather than over it.
+        const typed = chatInput.value;
+        chatInput.value = typed ? `${item.body.message}\n\n${typed}` : item.body.message;
+        autoResize();
+        addError(error, typed
+            ? ' Retry: your message has been restored above the draft you were typing — edit and press Enter.'
+            : ' Retry: your message has been restored — press Enter to send again.');
+        return;
+    }
+    writeJson(OUTBOX_KEY, readOutbox().map(i =>
+        i.id === item.id ? { ...i, rejected: error.message } : i));
 }
 
 /** Land a replayed turn's answer, but only when its pending bubble is on screen. */
@@ -501,13 +525,24 @@ function setServerReachable(reachable) {
 
 function renderOutboxNote() {
     if (!offlineBanner) return;
-    const queued = readOutbox().length;
+    const items = readOutbox();
+    // A rejected turn is queued but not waiting to be sent — it is waiting for
+    // its own chat to come back on screen — so it is counted separately or the
+    // banner would promise a send that will never happen.
+    const rejected = items.filter(i => i.rejected).length;
+    const queued = items.length - rejected;
     const plural = queued === 1 ? 'message' : 'messages';
     let text = '';
     if (serverReachable) text = queued ? `⏳ ${queued} ${plural} queued — sending…` : '';
     else text = queued
         ? `⏳ Offline — ${queued} ${plural} queued; sending resumes when the server is reachable.`
         : '⏳ Offline — the server is unreachable. Keep typing; your draft is saved on this device.';
+    if (rejected) {
+        const note = rejected === 1
+            ? '⚠️ A rejected message is waiting in the chat it came from.'
+            : `⚠️ ${rejected} rejected messages are waiting in the chats they came from.`;
+        text = text ? `${text} ${note}` : note;
+    }
     offlineBanner.textContent = text;
     offlineBanner.hidden = !text;
 }
@@ -1109,6 +1144,12 @@ async function sendMessage() {
         model: currentModel,
         effort: currentEffort,
         conversationId: currentConversationId,
+        // A connection can drop after the server has taken the turn and before
+        // the answer gets back — fetch() rejects with the same TypeError either
+        // way, so a replay is unavoidable and may be a duplicate. This id is how
+        // the server recognises the second copy and answers it with the first
+        // one's response instead of persisting the turn again.
+        clientTurnId: newId(),
         ...(activeSetup === 'spanish' && { coachType: 'spanish', topic: selectedTopic }),
     };
     const payload = JSON.stringify(body);
@@ -1154,6 +1195,10 @@ async function sendMessage() {
 
         const data = await response.json();
         loadingMessage.remove();
+        // A turn queued from this same chat before it had an id is waiting for
+        // the one this send just minted; hand it over before the drain below
+        // reaches it, or it will mint a conversation of its own.
+        if (!body.conversationId) adoptMintedConversation(pendingChatKey, data.conversationId);
 
         if (isSpanishFirst) {
             activeSetup = null;
@@ -1167,6 +1212,10 @@ async function sendMessage() {
             activateQuiz();
             if (isNew) loadConversations();
         }
+        // This send is the proof that the server is back, and on a phone that
+        // kept cellular it is the only proof there will be — `online` never
+        // fires. Anything still queued has been waiting for exactly this.
+        if (readOutbox().length) flushOutbox();
     } catch (error) {
         loadingMessage.remove();
         // The server never saw this turn, so it can wait on disk and be replayed
