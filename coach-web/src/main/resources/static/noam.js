@@ -296,6 +296,7 @@ const NOAM_STUDY_LIMIT = 50;
 
 let noamStudyEntries = null; // Map<lexemeId, {item, checked, mark, rowEl, checkboxEl, knownBtn, ignoreBtn}>
 let noamStudyState = null;   // {loadPage, offset, exhausted, loading, paging} for the open list, or null
+let noamMarksFlush = Promise.resolve(); // the most recent background marks flush; always settles, never rejects
 
 function openStudyItems(documentId, title) {
     renderNoamItemList(document.getElementById('noamPanel'), {
@@ -403,6 +404,12 @@ async function loadNextStudyPage(list) {
     state.loading = true;
     if (state.offset === 0) list.innerHTML = '<p class="muted">Cargando palabras…</p>';
     try {
+        // Both item sources are derived from the very lexeme states a tab switch
+        // may have just flushed in the background, and that POST detours through
+        // coach-web while these GETs go browser-direct to noam — so without this
+        // the read wins the race and re-lists words the user already triaged. The
+        // "Cargando…" placeholder is already up, so the wait costs no pixels.
+        await noamMarksFlush;
         const items = await state.loadPage(state.offset);
         if (state !== noamStudyState) return;
         if (state.offset === 0) list.innerHTML = '';
@@ -578,12 +585,20 @@ function pendingStudyMarks() {
 // navigation stays instant at the cost of losing the marks if the POST fails. Clearing
 // noamStudyEntries afterwards makes this idempotent: activateNoamTab now calls it on
 // every tab switch, and a stale list from a prior visit must not get re-flushed each time.
+// Both globals are cleared together: noamStudyState alone is what loadNextStudyPage's
+// staleness guard compares against, so leaving it installed would wave a page that
+// landed after the teardown straight through into the nulled entries map.
 function flushStudyMarksInBackground() {
     if (!noamStudyEntries) return;
     const { known, ignored } = pendingStudyMarks();
-    if (known.length > 0) postNoamLexemeStates(known, 'KNOWN').catch(() => {});
-    if (ignored.length > 0) postNoamLexemeStates(ignored, 'IGNORED').catch(() => {});
+    const sent = [];
+    if (known.length > 0) sent.push(postNoamLexemeStates(known, 'KNOWN'));
+    if (ignored.length > 0) sent.push(postNoamLexemeStates(ignored, 'IGNORED'));
+    // allSettled both handles the rejections (nothing else awaits these) and gives
+    // the next study-item read something to wait on that can never reject.
+    noamMarksFlush = Promise.allSettled(sent);
     noamStudyEntries = null;
+    noamStudyState = null;
 }
 
 async function postNoamLexemeStates(lexemeIds, state) {

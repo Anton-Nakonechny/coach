@@ -13,11 +13,19 @@ function studyItems(count, startIndex = 0) {
     };
 }
 
-// Routes everything the 文 mode needs to reach a document's study-item list:
-// the config probe, the availability probe + Documentos grid, and the paged
-// study-items endpoint. `pages` is consulted per offset so a test can hand out
-// a full page first and a short page second.
-async function routeNoam(page, { pages, onLexemeStates, studyItemsHandler, onOffset, onSeed } = {}) {
+// The Cola tab's study queue is the same row shape without the `items` envelope:
+// the endpoint answers with a bare array (no offset, no paging).
+function queueItems(count, startIndex = 0) {
+    return studyItems(count, startIndex).items;
+}
+
+// Routes everything the 文 mode needs to reach either study-item list: the config
+// probe, the availability probe + Documentos grid, the paged study-items endpoint
+// and the Cola tab's study queue. `pages` is consulted per offset so a test can
+// hand out a full page first and a short page second. The queue is stubbed even
+// for tests that never open Cola — clicking that tab now fetches, and an unrouted
+// endpoint would put the click on the real network.
+async function routeNoam(page, { pages, onLexemeStates, studyItemsHandler, onOffset, onSeed, queue, queueHandler } = {}) {
     await page.route('**/api/models', route =>
         route.fulfill({ contentType: 'application/json', body: JSON.stringify(MODELS_RESPONSE) }));
     await page.route('**/api/conversations', route =>
@@ -34,6 +42,10 @@ async function routeNoam(page, { pages, onLexemeStates, studyItemsHandler, onOff
         onOffset && onOffset(offset);
         const body = (pages && pages[offset]) || { items: [] };
         await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    await page.route(`${NOAM_BASE}/profiles/*/study-queue**`, async route => {
+        if (queueHandler) return queueHandler(route);
+        await route.fulfill({ contentType: 'application/json', body: JSON.stringify(queue || []) });
     });
     await page.route('**/api/noam/lexeme-states', async route => {
         if (onLexemeStates) return onLexemeStates(route);
@@ -52,11 +64,15 @@ async function routeNoam(page, { pages, onLexemeStates, studyItemsHandler, onOff
 }
 
 async function openDocument(page) {
+    await enterNoam(page);
+    await page.click('.noam-doc-row');
+    await expect(page.locator('.noam-study-row').first()).toBeVisible();
+}
+
+async function enterNoam(page) {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
     await page.click('button.mode-btn[data-mode="documents"]');
-    await page.click('.noam-doc-row');
-    await expect(page.locator('.noam-study-row').first()).toBeVisible();
 }
 
 test('Continuar hands checked items off to the 字 quiz', async ({ page }) => {
@@ -160,4 +176,59 @@ test('switching tabs flushes marks instead of dropping them', async ({ page }) =
     await page.click('.noam-tab[data-tab="cola"]');
 
     await expect.poll(() => flushed).toEqual([{ lexemeIds: ['lex-0'], state: 'KNOWN' }]);
+});
+
+// Re-clicking Cola is the natural "refresh" gesture, and it runs the background
+// marks flush and the queue fetch back to back. noam derives the queue from the
+// very lexeme states that flush is writing, so the read has to land after the
+// write — otherwise the word just marked conocida comes straight back, unmarked.
+test('re-entering Cola waits for the marks flush before reloading the queue', async ({ page }) => {
+    const marked = new Set();
+    await routeNoam(page, {
+        queueHandler: async route => {
+            const due = queueItems(2).filter(it => !marked.has(it.lexeme.id));
+            await route.fulfill({ contentType: 'application/json', body: JSON.stringify(due) });
+        },
+        onLexemeStates: async route => {
+            // The POST detours through coach-web while the GET goes browser-direct
+            // to noam, so in the real app the write is the slower of the two.
+            await new Promise(resolve => setTimeout(resolve, 300));
+            JSON.parse(route.request().postData()).lexemeIds.forEach(id => marked.add(id));
+            await route.fulfill({ status: 204, body: '' });
+        },
+    });
+    await enterNoam(page);
+    await page.click('.noam-tab[data-tab="cola"]');
+    await expect(page.locator('.noam-study-row')).toHaveCount(2);
+
+    await page.locator('.noam-study-row').first().locator('.noam-mark-known').click();
+    await page.click('.noam-tab[data-tab="cola"]');
+
+    await expect(page.locator('.noam-study-row')).toHaveCount(1);
+    await expect(page.locator('.noam-study-row')).toContainText('palabra1');
+});
+
+// Leaving a tab mid-load fails silently when it fails: the stale page lands, sees
+// its own state still installed, and throws on the entries map the flush nulled —
+// inside loadNextStudyPage's own try/catch, painting into a list already detached
+// from the DOM. There is nothing on screen to assert, so assert the invariant that
+// decides whether it runs at all: the two globals are set and cleared together.
+test('leaving a tab mid-load does not strand the study-list globals', async ({ page }) => {
+    let releaseQueue;
+    await routeNoam(page, {
+        queueHandler: async route => {
+            await new Promise(resolve => { releaseQueue = resolve; });
+            await route.fulfill({ contentType: 'application/json', body: JSON.stringify(queueItems(2)) });
+        },
+    });
+    await enterNoam(page);
+    await page.click('.noam-tab[data-tab="cola"]');
+    await expect(page.locator('.noam-study-list')).toContainText('Cargando');
+
+    await page.click('.noam-tab[data-tab="documentos"]');
+    await expect(page.locator('.noam-doc-row')).toBeVisible();
+    await expect.poll(() => Boolean(releaseQueue)).toBe(true);
+    releaseQueue();
+
+    await expect.poll(() => page.evaluate(() => noamStudyEntries === null && noamStudyState === null)).toBe(true);
 });
