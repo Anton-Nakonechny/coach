@@ -997,3 +997,27 @@ header { display: none; }
 .next-question-row { margin-top: 0.6rem; }
 .next-question { padding: 0.5rem 0.9rem; background: var(--surface); border: 1px solid var(--claude-accent); border-radius: 8px; color: var(--claude-accent); font-size: 0.875rem; cursor: pointer; }
 .next-question:hover { background: var(--surface-hover); }
+
+/* ── Offline draft + outbox ─────────────────────────────────── */
+
+/* Strip between the transcript and the composer: unreachable server, queued turns. */
+.offline-banner {
+    flex-shrink: 0;
+    margin: 0 0.5rem 0.4rem;
+    padding: 0.45rem 0.75rem;
+    border: 1px solid var(--coach-accent);
+    border-radius: var(--radius);
+    background: rgba(255, 140, 0, 0.08);
+    color: var(--coach-accent);
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+
+/* A user turn sitting in the outbox: drawn, but visibly not yet delivered. */
+.message.user.pending .message-content {
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px dashed var(--coach-accent);
+    opacity: 0.85;
+}
+.message.user.pending .copy-button { display: none; }

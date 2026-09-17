@@ -542,7 +542,17 @@ async function proceedStudyItems(proceedBtn, errorEl, list) {
         return;
     }
 
-    startWordQuizFromNoam(checkedItems);
+    // /seed 400s the whole batch on a blank english, so untranslated items are
+    // dropped before the request goes out. When that leaves nothing, say so here —
+    // startWordQuizFromNoam has no error slot to report into and would just return,
+    // leaving Continuar looking dead with the selection still checked.
+    const translated = checkedItems.filter(it => it.english && it.english.trim());
+    if (translated.length === 0) {
+        showStudyListError(errorEl, 'Las palabras seleccionadas no tienen traducción — elige otras.');
+        return;
+    }
+
+    startWordQuizFromNoam(translated);
 }
 
 // The marks waiting to be flushed, split by state. Shared by Proceed (which awaits
@@ -581,12 +591,16 @@ async function postNoamLexemeStates(lexemeIds, state) {
     }
 }
 
+// onRetry is optional: a failed network call gets a Reintentar button, but a
+// selection that simply has nothing to send would only repeat itself, so that
+// caller omits it and the message alone tells the user what to change.
 function showStudyListError(errorEl, message, onRetry) {
     errorEl.innerHTML = '';
     errorEl.hidden = false;
     const p = document.createElement('p');
     p.textContent = message;
     errorEl.appendChild(p);
+    if (!onRetry) return;
     const retry = document.createElement('button');
     retry.type = 'button';
     retry.className = 'topic-button';
@@ -673,10 +687,13 @@ function stripEdges(s) {
 // collapse them, silently reporting both duplicate-gloss words' grades to one lexeme.
 // Both bySpanish and noamWordSource are multimaps (arrays per key), not single-valued
 // Maps: two lexemes can also share the same SPANISH surface form (homographs), and a
-// plain Map.set would let the second overwrite the first here too. requestItems and
-// responseItems are same-length/same-order (both derived from one /seed round-trip),
-// so zipping same-key entries in encounter order (shift the oldest queued request
-// item for each response item) pairs them correctly without cross-lexeme mixups.
+// plain Map.set would let the second overwrite the first here too. Within one such
+// key, position cannot be used to pair request to response: SpanishWordController.seed
+// shuffles the pairs before responding, so the two are same-length but NOT same-order.
+// English is what separates homograph twins ("wine" vs "he came" for vino) and /seed
+// echoes it back untouched, so match on it and fall back to the oldest queued entry
+// when it doesn't resolve — a wrong pairing here would report one lexeme's SRS grade
+// to the other on the next re-seeded pass.
 function cacheNoamWordSource(requestItems, responseItems) {
     const bySpanish = new Map();
     requestItems.forEach(it => {
@@ -687,8 +704,9 @@ function cacheNoamWordSource(requestItems, responseItems) {
     noamWordSource = new Map();
     responseItems.forEach(respItem => {
         const queue = bySpanish.get(respItem.spanish);
-        const src = queue && queue.shift();
-        if (!src) return;
+        if (!queue || queue.length === 0) return;
+        const match = queue.findIndex(it => it.english === respItem.english);
+        const [src] = queue.splice(match >= 0 ? match : 0, 1);
         if (!noamWordSource.has(respItem.spanish)) noamWordSource.set(respItem.spanish, []);
         noamWordSource.get(respItem.spanish).push({ lexemeId: src.lexemeId, spanish: respItem.spanish, english: respItem.english });
     });

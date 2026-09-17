@@ -68,6 +68,60 @@ test('a missed homograph pair reseeds both distinct lexemeIds, not the same one 
     expect(retryLexemeIds).toEqual(['lex-vino-came', 'lex-vino-wine']);
 });
 
+// SpanishWordController.seed shuffles the pairs before responding, so the /seed
+// response order is NOT the request order. Reversing it here is the smallest
+// shuffle that actually crosses two homograph twins; the other spec's stub
+// echoes request order and so can never catch this.
+test('a shuffled seed response still pairs each lexemeId with its own english', async ({ page }) => {
+    await routeDefaults(page);
+
+    const seedRequests = [];
+    await page.route('**/api/spanish/words/seed', async route => {
+        const body = JSON.parse(route.request().postData());
+        seedRequests.push(body.items);
+        const items = body.items.map(it => ({ english: it.english, hint: it.spanish[0], spanish: it.spanish }));
+        await route.fulfill({
+            contentType: 'application/json',
+            body: JSON.stringify({ setId: `set-${seedRequests.length}`, items: items.reverse() }),
+        });
+    });
+    // Graded in the response's (reversed) order, the way the server grades its
+    // own stored pairs.
+    await page.route('**/api/spanish/words/check', async route => {
+        await route.fulfill({
+            contentType: 'application/json',
+            body: JSON.stringify({
+                results: [
+                    { english: 'he came', spanish: 'vino', correct: false, fullHint: false },
+                    { english: 'wine', spanish: 'vino', correct: false, fullHint: false },
+                ],
+            }),
+        });
+    });
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await page.evaluate(() => {
+        window.startWordQuizFromNoam([
+            { lexemeId: 'lex-vino-wine', spanish: 'vino', english: 'wine' },
+            { lexemeId: 'lex-vino-came', spanish: 'vino', english: 'he came' },
+        ]);
+    });
+
+    await expect(page.locator('.word-answer').first()).toBeVisible();
+    await page.locator('.word-answer').first().fill('wrong');
+    await page.locator('.word-answer').nth(1).fill('wrong');
+    await page.click('.word-check button:has-text("Comprobar")');
+    await page.click('button:has-text("De nuevo")');
+
+    await expect.poll(() => seedRequests.length).toBe(2);
+    // Both lexemes come back (the old assertion), AND each keeps its own gloss —
+    // a crossed pair would report the wine grade to the "he came" lexeme.
+    const byLexeme = Object.fromEntries(seedRequests[1].map(it => [it.lexemeId, it.english]));
+    expect(byLexeme).toEqual({ 'lex-vino-wine': 'wine', 'lex-vino-came': 'he came' });
+});
+
 test('practicar en 語 then back to 字 still reseeds via noam, not the LLM translate path', async ({ page }) => {
     await routeDefaults(page);
 

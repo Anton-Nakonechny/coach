@@ -69,6 +69,27 @@ test('Continuar hands checked items off to the 字 quiz', async ({ page }) => {
     await expect(page.locator('.word-check')).toBeVisible();
 });
 
+// Untranslated study items are dropped before /seed is called (a blank english
+// would 400 the whole batch). When that drops everything, Continuar has nothing
+// to hand off — and must say so rather than looking dead.
+test('Continuar reports a selection with no translations instead of doing nothing', async ({ page }) => {
+    let seedCalled = false;
+    await routeNoam(page, {
+        pages: { 0: { items: [{ lexeme: { id: 'lex-0', displayText: 'palabra0' }, translation: '' }] } },
+        onSeed: async route => { seedCalled = true; await route.fulfill({ status: 500, body: '' }); },
+    });
+    await openDocument(page);
+
+    await page.locator('.noam-study-row').first().locator('.noam-study-check').check();
+    await page.click('.noam-study-proceed');
+
+    await expect(page.locator('.noam-inline-error')).toBeVisible();
+    await expect(page.locator('.noam-inline-error')).toContainText('traducción');
+    expect(seedCalled).toBe(false);
+    // The list stays up so the user can pick different items and retry.
+    await expect(page.locator('.noam-study-proceed')).toBeEnabled();
+});
+
 test('Continuar loads the next page after flushed rows leave the list short', async ({ page }) => {
     // Paging is scroll-driven, so rows removed by a flush are never replaced:
     // enough Continuar rounds and the list stops overflowing, which kills the

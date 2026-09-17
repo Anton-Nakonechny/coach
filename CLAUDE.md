@@ -189,6 +189,20 @@ see the fix.
   the handler maps
   errors to `{"message": ...}` (FastAPI used `{"detail": ...}`) with idiomatic Spring
   codes (400 / 404 / 500 — Bean Validation failures return 400, where FastAPI returned 422).
+- **`web/TurnReplayGuard`** — both `/api/chat` overloads run through it. The browser's
+  offline outbox replays turns whose answer was lost in transit (`fetch()` rejects with
+  the same TypeError whether the request never left or the response did), so a turn may
+  arrive twice; the optional `clientTurnId` on `ChatRequest` identifies it, and a repeat
+  is served the first run's `ChatResponse` instead of appending the turn (or minting a
+  conversation) again. The key is `clientTurnId` **plus `conversationId`**, not the id
+  alone: the client rewrites a queued turn's `conversationId` when its chat is minted
+  elsewhere (`adoptMintedConversation`), and that rewrite means "this turn belongs
+  there now" — replaying the first run's answer would repoint the open chat at the
+  conversation that run minted and split one chat in two. In-memory
+  `ConcurrentHashMap` of `CompletableFuture`s, TTL 60 min,
+  max 500 — same ephemeral shape as `WordSetStore`: a replay arriving while the first is
+  still generating waits on it, a failed turn forgets its id so the retry goes through,
+  and a restart forgets everything. A blank/absent id opts out.
 - **`config/AppConfig`** — `@ConfigurationProperties(coach.*)`: api key, `maxTokens`
   (16000), `conversationsDir`.
 

@@ -59,7 +59,7 @@ function addError(error, retryHint = '') {
 // DOM elements
 let chatMessages, chatInput, sendButton, modelButtons, effortSelect, effortNote,
     conversationList, clearAllButton, attachButton, fileInput, attachmentStrip,
-    composerError, dropOverlay, coachNote,
+    composerError, dropOverlay, coachNote, offlineBanner,
     sidebar, coachPanel, sidebarToggle, coachToggle, drawerBackdrop,
     spanishModeToggle,
     sidebarCollapse, coachCollapse, sidebarRestore, coachRestore;
@@ -79,6 +79,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     composerError   = document.getElementById('composerError');
     dropOverlay     = document.getElementById('dropOverlay');
     coachNote       = document.getElementById('coachNote');
+    offlineBanner   = document.getElementById('offlineBanner');
     sidebar         = document.getElementById('sidebar');
     coachPanel      = document.getElementById('coachPanel');
     sidebarToggle      = document.getElementById('sidebarToggle');
@@ -95,7 +96,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyPanelState();
     await loadModels();
     await loadConversations();
-    startNewChat();
+    // A restored draft owns the screen; only a cold start gets the welcome message.
+    if (!restoreDraft()) startNewChat();
+    flushOutbox();
 });
 
 function setupEventListeners() {
@@ -111,6 +114,7 @@ function setupEventListeners() {
         }
     });
     chatInput.addEventListener('input', autoResize);
+    chatInput.addEventListener('input', saveDraftSoon);
     chatInput.addEventListener('paste', handlePaste);
     document.getElementById('newChatButton').addEventListener('click', () => {
         startNewChat();
@@ -136,6 +140,16 @@ function setupEventListeners() {
     spanishModeToggle.addEventListener('click', (e) => {
         const mode = e.target.dataset.mode;
         if (mode) selectSpanishMode(mode);
+    });
+    // Persist before the tab can be discarded, and retry the outbox whenever the
+    // device comes back — a phone waking on the home network usually only fires
+    // visibilitychange, never a reload.
+    window.addEventListener('pagehide', saveDraftNow);
+    window.addEventListener('offline', () => setServerReachable(false));
+    window.addEventListener('online', () => { setServerReachable(true); flushOutbox(); });
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') saveDraftNow();
+        else flushOutbox();
     });
     sidebarCollapse.addEventListener('click', () => togglePanelCollapsed('sidebar'));
     sidebarRestore.addEventListener('click', () => togglePanelCollapsed('sidebar'));
@@ -168,6 +182,421 @@ function togglePanelCollapsed(key) {
     collapsed[key] = !collapsed[key];
     localStorage.setItem(PANEL_COLLAPSE_KEY, JSON.stringify(collapsed));
     applyPanelState();
+}
+
+// ── Offline draft + outbox ───────────────────────────────────
+// Mobile Chrome discards background tabs and re-navigates on focus, so a phone
+// carried out of the server's network loses both the rendered sentences and the
+// answers typed against them. Three pieces make that survivable without a service
+// worker (which needs a secure context this plain-http LAN origin can't offer):
+// the /api/models payload is cached so a cold offline load still has a model key
+// to send with, the on-screen chat plus composer text are snapshotted to
+// localStorage, and a send that fails on the network is queued and replayed once
+// the server is reachable again. An in-flight 字 quiz is deliberately out of
+// scope: its pairs live in the server's WordSetStore, which is single-use and
+// expires after an hour, so a deferred /check could not be graded anyway.
+
+const DRAFT_KEY  = 'coach.draft';
+const OUTBOX_KEY = 'coach.outbox';
+const MODELS_KEY = 'coach.models';
+const DRAFT_MAX_MESSAGES = 40;
+
+let serverReachable = true;
+let draftTimer = null;
+let flushing = false;
+
+// A turn queued before its chat has been minted carries conversationId: null, and
+// so does a turn queued in a *different* chat started while still offline — the
+// two are indistinguishable from the body alone. This token disambiguates them:
+// it is regenerated whenever the composer starts addressing a fresh unminted
+// chat, so flushOutbox can hand the first mint's id to that chat's later turns
+// and only to those.
+let pendingChatKey = newChatKey();
+
+// crypto.randomUUID() needs a secure context, which this plain-http LAN origin
+// is not; time plus a little entropy is enough for ids only this device mints.
+function newId() {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function newChatKey() {
+    return `pending-${newId()}`;
+}
+
+function readJson(key) {
+    try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
+}
+
+// Reports whether the write landed. setItem throws on a full quota and in some
+// private-storage modes, and one caller — the outbox — is holding the only copy
+// of something, so it has to be able to ask.
+function writeJson(key, value) {
+    try {
+        localStorage.setItem(key, JSON.stringify(value));
+        return true;
+    } catch (e) {
+        console.warn(`Could not persist ${key}:`, e);
+        return false;
+    }
+}
+
+// Every rendered bubble keeps the arguments it was built from (see addMessage),
+// so the chat redraws identically without asking the server for it again.
+function snapshotMessages() {
+    return [...chatMessages.querySelectorAll('.message')]
+        .map(el => el._snapshot)
+        .filter(Boolean)
+        .slice(-DRAFT_MAX_MESSAGES);
+}
+
+function saveDraftNow() {
+    clearTimeout(draftTimer);
+    if (!chatMessages) return;
+    const messages = snapshotMessages();
+    // The same refusal clearDraft makes, against the other way the snapshot can
+    // lose an undelivered turn: not a delete but an overwrite. resetToSetup empties
+    // the pane for 字 / a topic grid / the noam shell, and the next save — the
+    // welcome bubble's deferred one, or the first keystroke in the composer —
+    // would persist a pane the pending bubble is no longer in. The last coherent
+    // snapshot is worth more than the newer text: only it can put the bubble back
+    // for settleQueued to land the replayed answer on.
+    // Some pending bubble is not enough. There is one draft slot, and two chats
+    // can each be holding a queued turn — a chat started offline while an earlier
+    // one's turn was still waiting. A pane that covers only its own turn would
+    // take the slot from the chat it does not cover, and that chat's bubble
+    // exists nowhere else: its turn could then never settle, never be handed
+    // back, and so never leave the outbox — which freezes this guard, and
+    // clearDraft with it, shut for the rest of the browser install.
+    const drawn = new Set(messages.map(m => m.outboxId));
+    const coversTheOutbox = readOutbox().every(item => drawn.has(item.id));
+    if (!coversTheOutbox) return;
+    if (!messages.length && !chatInput.value) { clearDraft(); return; }
+    writeJson(DRAFT_KEY, {
+        savedAt: Date.now(),
+        conversationId: currentConversationId,
+        coachType: conversationCoach[currentConversationId] || 'none',
+        composerText: chatInput.value,
+        spanishMode,
+        activeSetup,
+        // Travels with the snapshot because the turns it groups do: a reload
+        // between two offline sends would otherwise mint a fresh key for the
+        // second one and split one chat across two server conversations.
+        pendingChatKey,
+        messages,
+    });
+}
+
+function saveDraftSoon() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraftNow, 300);
+}
+
+// Refused while the outbox still holds a turn. A queued turn's pending bubble
+// exists only in this snapshot, and settleQueued needs it on screen to land the
+// replayed answer — so an emptied chat pane (resetToSetup, a new chat, the noam
+// shell) must not be allowed to take the undelivered turn down with it.
+function clearDraft() {
+    clearTimeout(draftTimer);
+    if (readOutbox().length > 0) return;
+    try { localStorage.removeItem(DRAFT_KEY); } catch {}
+}
+
+/**
+ * Redraw the last snapshot over the empty chat pane. Only worth doing when there
+ * is something to rescue — typed text, an undelivered turn, or an unreachable
+ * server; otherwise a plain reload should still land on a fresh chat the way it
+ * always has. Returns true when it took over the screen, so the caller can skip
+ * startNewChat().
+ */
+function restoreDraft() {
+    const draft = readJson(DRAFT_KEY);
+    if (!draft || !draft.messages || !draft.messages.length) return false;
+    if (serverReachable && !draft.composerText && readOutbox().length === 0) return false;
+
+    // A coach's topic grid renders outside addMessage, so its snapshot is nothing
+    // but an orphaned welcome bubble: restoring it would show an instruction whose
+    // grid is gone, and the composer would send the answer as prose. Better to
+    // start clean — carrying the typed text across, since that much does survive.
+    // 字 is the exception, and the reason this is a split rather than a blanket
+    // bail: its entire UI *is* that one bubble, so it restores faithfully.
+    const gridSetup = draft.activeSetup && draft.activeSetup !== 'spanish-words';
+    // Español is the one setup that lets a real turn be sent from its own screen
+    // (once a topic is picked), and activeSetup only clears when the answer
+    // arrives — so a queued turn can be sitting inside a grid snapshot. It
+    // outranks the orphaned welcome: wiping the pane would take its bubble with
+    // it and leave the replayed answer nothing to land on.
+    const queuedTurn = draft.messages.some(m => m.outboxId);
+    if (gridSetup && !queuedTurn) {
+        if (!draft.composerText) return false;
+        chatInput.value = draft.composerText;
+        autoResize();
+        return false;
+    }
+
+    if (draft.pendingChatKey) pendingChatKey = draft.pendingChatKey;
+    currentConversationId = draft.conversationId || null;
+    const coachType = draft.coachType || 'none';
+    if (currentConversationId) conversationCoach[currentConversationId] = coachType;
+
+    chatMessages.innerHTML = '';
+    draft.messages.forEach(m => {
+        const el = addMessage(m.content, m.role, m.attachments, m.sentences, m.question);
+        if (!m.outboxId) return;
+        el.classList.add('pending');
+        el._snapshot.outboxId = m.outboxId;
+    });
+    chatInput.value = draft.composerText || '';
+    autoResize();
+    resetSetupState();
+    // 字 is the only setup worth carrying over: restoring it is what makes the
+    // redrawn "pega palabras" prompt route a pasted list to the 字 quiz instead of
+    // posting it to /api/chat as prose. A grid setup that got this far did so on
+    // the strength of its queued turn and its grid is gone, so keeping its name
+    // would only make sendMessage refuse the next message ("Elige un tema primero").
+    activeSetup = draft.activeSetup === 'spanish-words' ? 'spanish-words' : null;
+    setCoachRadio(coachType);
+    setSpanishMode(draft.spanishMode || 'language');
+    highlightActiveConversation();
+    activateQuiz();
+    return true;
+}
+
+function readOutbox() {
+    const items = readJson(OUTBOX_KEY);
+    return Array.isArray(items) ? items : [];
+}
+
+/**
+ * Queue a turn for replay, or null when the queue would not take it.
+ *
+ * The caller has already cleared the composer, so the queue is about to hold the
+ * only copy of this text. If the write did not land there is nothing to replay
+ * it from, and a bubble marked `pending` would be promising a send that can
+ * never happen — the caller has to be told so it can hand the text back instead.
+ */
+function queueSend(body) {
+    const item = {
+        id: newId(),
+        queuedAt: Date.now(),
+        chatKey: body.conversationId || pendingChatKey,
+        body,
+    };
+    return writeJson(OUTBOX_KEY, [...readOutbox(), item]) ? item : null;
+}
+
+function dropFromOutbox(id) {
+    writeJson(OUTBOX_KEY, readOutbox().filter(i => i.id !== id));
+}
+
+/**
+ * Hand a freshly minted conversation to the turns of that same chat still
+ * waiting in the queue, on disk and — during a drain — in the list being
+ * iterated. Holding the id only in a variable loses it the moment the drain
+ * stops early or the mint happens on a direct send instead: the next flush would
+ * post the rest of that chat with conversationId: null and mint a second server
+ * conversation for what the user sees as one chat.
+ *
+ * `queued` is the drain's own in-memory copy (already read before the loop) and
+ * `minterId` the item that did the minting, since it has left the stored queue
+ * but not that copy.
+ */
+function adoptMintedConversation(chatKey, conversationId, queued = null, minterId = null) {
+    if (!conversationId) return;
+    const redirect = item => {
+        if (item.id === minterId || item.chatKey !== chatKey || item.body.conversationId) return item;
+        // coachType/topic is how a turn asks to *start* a coach chat, and the
+        // server refuses it next to a conversationId ("coachType can only be set
+        // when starting a new chat"). That chat exists now, so only the id stays.
+        const { coachType, topic, ...body } = item.body;
+        return { ...item, body: { ...body, conversationId } };
+    };
+    if (queued) queued.forEach((item, i) => { queued[i] = redirect(item); });
+    writeJson(OUTBOX_KEY, readOutbox().map(redirect));
+}
+
+/**
+ * How long a chat turn may hold the connection open before it is abandoned.
+ *
+ * Minutes, not seconds: no response headers arrive until the model has finished
+ * generating (server-side timeout is 5m). Shared by the direct send and the
+ * replay drain, because a half-open socket — a phone moving from WiFi to
+ * cellular — strands either one the same way. A function rather than a constant
+ * so the e2e suite can shrink it and watch the timer fire.
+ */
+function turnTimeoutMs() {
+    return 6 * 60 * 1000;
+}
+
+// fetch() rejects with a TypeError when the request never left the device or the
+// host couldn't be resolved. A timeout arrives as an AbortError and a rejection
+// from the server as our own Error — both may have been processed already, so
+// only a TypeError is safe to replay automatically.
+function isNetworkFailure(error) {
+    return error instanceof TypeError || error.message === 'Failed to fetch';
+}
+
+/**
+ * Replay queued turns oldest-first, stopping at the first still-unreachable send.
+ *
+ * Guarded against re-entry: a phone waking on the home network fires `online` and
+ * `visibilitychange` back to back, and two overlapping drains would both read the
+ * queue before either could remove anything — POSTing every item twice, which the
+ * server happily persists twice. (The guard is per-tab; two tabs sharing this
+ * origin's localStorage would still double-send.)
+ */
+async function flushOutbox() {
+    if (flushing) return;
+    const items = readOutbox();
+    if (!items.length) return;
+    flushing = true;
+    try {
+        for (const item of items) {
+            // A turn the server already refused is never sent again. It is still
+            // here because the chat it came from was off screen when the refusal
+            // arrived; every drain is another chance to hand its text back.
+            if (item.rejected) { failQueued(item, new Error(item.rejected)); continue; }
+            // settleQueued renders, and a malformed answer can throw from there —
+            // long after the turn was delivered and dropped from the queue. Same
+            // distinction sendMessage draws with its own flag: past this point a
+            // failure says nothing about whether the server is reachable, so it
+            // must not stop the drain or flip the UI offline.
+            let delivered = false;
+            // `flushing` is held for the whole of this await, and every other way
+            // into the drain — `online`, `visibilitychange`, the next successful
+            // send — short-circuits on it. A socket that goes half-open would
+            // therefore wedge the queue for the rest of the session while the
+            // banner kept promising the send would resume, so the replay takes
+            // the same deadline the direct send does.
+            const controller = new AbortController();
+            const abortTimer = setTimeout(() => controller.abort(), turnTimeoutMs());
+            try {
+                const response = await fetch(`${API_URL}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(item.body),
+                    signal: controller.signal,
+                });
+                const data = await response.json().catch(() => ({}));
+                delivered = true;
+                // The server answered, whatever it answered — so the banner must
+                // stop claiming it is unreachable.
+                setServerReachable(true);
+                if (response.ok) {
+                    dropFromOutbox(item.id);
+                    if (!item.body.conversationId)
+                        adoptMintedConversation(item.chatKey, data.conversationId, items, item.id);
+                    settleQueued(item, data);
+                } else {
+                    // Terminal: a rejection will not become an acceptance on retry,
+                    // so this turn is done being sent — but its text is never
+                    // silently destroyed, which is failQueued's whole job.
+                    failQueued(item, new Error(data.message || 'A queued message was rejected'));
+                }
+            } catch (e) {
+                if (delivered) {
+                    console.warn('A replayed answer could not be rendered:', e);
+                    continue;
+                }
+                // An abort lands here too, and wants the same treatment a dropped
+                // connection gets: the turn stays queued, the drain stops, and the
+                // banner says so. Its clientTurnId is what stops the retry from
+                // double-posting a turn the server did take.
+                setServerReachable(false);
+                break;
+            } finally {
+                clearTimeout(abortTimer);
+            }
+        }
+    } finally {
+        flushing = false;
+    }
+    renderOutboxNote();
+    loadConversations();
+}
+
+/** The on-screen bubble a queued turn was drawn as, if it is still mounted. */
+function pendingBubble(item) {
+    return [...chatMessages.querySelectorAll('.message.user.pending')]
+        .find(el => el._snapshot && el._snapshot.outboxId === item.id);
+}
+
+/**
+ * A replayed turn the server refused. The text lives nowhere else by now — the
+ * composer was cleared when it was queued — so it has to come back to the user,
+ * and to the right chat: `chatInput` and `chatMessages` are whatever pane is
+ * mounted, which during a drain need not be the one this turn came from. Its own
+ * bubble being on screen is the proof that it is, exactly as settleQueued reads
+ * that same signal. Otherwise the turn stays queued — never sent again, but
+ * still holding its chat's draft snapshot open — until that chat is back.
+ */
+function failQueued(item, error) {
+    const bubble = pendingBubble(item);
+    if (bubble) {
+        dropFromOutbox(item.id);
+        bubble.remove();
+        // The composer stayed free while this turn waited, so it may already hold
+        // a newer draft. Both texts exist nowhere else, so the rejected one goes
+        // in above the draft rather than over it.
+        const typed = chatInput.value;
+        chatInput.value = typed ? `${item.body.message}\n\n${typed}` : item.body.message;
+        autoResize();
+        addError(error, typed
+            ? ' Retry: your message has been restored above the draft you were typing — edit and press Enter.'
+            : ' Retry: your message has been restored — press Enter to send again.');
+        return;
+    }
+    writeJson(OUTBOX_KEY, readOutbox().map(i =>
+        i.id === item.id ? { ...i, rejected: error.message } : i));
+}
+
+/** Land a replayed turn's answer, but only when its pending bubble is on screen. */
+function settleQueued(item, data) {
+    const bubble = pendingBubble(item);
+    if (!bubble) return;
+    bubble.classList.remove('pending');
+    delete bubble._snapshot.outboxId;
+    currentConversationId = data.conversationId;
+    // A coach-first turn takes its setup screen down with it, exactly as
+    // sendMessage's own success path does and for the same reason: the chat it
+    // asked for exists now, so the next message must not resend coachType/topic
+    // alongside the id it just minted.
+    if (item.body.coachType) { activeSetup = null; selectedTopic = null; }
+    // addMessage always appends, but the later queued turns' bubbles are already
+    // mounted below this one — so the answer is moved up under the turn it
+    // answers, which is also the order snapshotMessages then persists.
+    const answer = addMessage(data.answer, 'assistant', null, data.sentences, data.question);
+    bubble.after(answer);
+    activateQuiz();
+    saveDraftNow();
+}
+
+function setServerReachable(reachable) {
+    serverReachable = reachable;
+    renderOutboxNote();
+}
+
+function renderOutboxNote() {
+    if (!offlineBanner) return;
+    const items = readOutbox();
+    // A rejected turn is queued but not waiting to be sent — it is waiting for
+    // its own chat to come back on screen — so it is counted separately or the
+    // banner would promise a send that will never happen.
+    const rejected = items.filter(i => i.rejected).length;
+    const queued = items.length - rejected;
+    const plural = queued === 1 ? 'message' : 'messages';
+    let text = '';
+    if (serverReachable) text = queued ? `⏳ ${queued} ${plural} queued — sending…` : '';
+    else text = queued
+        ? `⏳ Offline — ${queued} ${plural} queued; sending resumes when the server is reachable.`
+        : '⏳ Offline — the server is unreachable. Keep typing; your draft is saved on this device.';
+    if (rejected) {
+        const note = rejected === 1
+            ? '⚠️ A rejected message is waiting in the chat it came from.'
+            : `⚠️ ${rejected} rejected messages are waiting in the chats they came from.`;
+        text = text ? `${text} ${note}` : note;
+    }
+    offlineBanner.textContent = text;
+    offlineBanner.hidden = !text;
 }
 
 function setSpanishMode(mode) {
@@ -347,6 +776,7 @@ async function enterSpanishSetup() {
 // Clear the chat pane back to an in-panel setup screen — no conversation open.
 function resetToSetup() {
     currentConversationId = null;
+    pendingChatKey = newChatKey();
     chatMessages.innerHTML = '';
     highlightActiveConversation();
     coachNote.textContent = '';
@@ -640,8 +1070,33 @@ function setupDragAndDrop() {
 // ── Model / effort ───────────────────────────────────────────
 
 async function loadModels() {
-    const response = await fetch(`${API_URL}/models`);
-    const data = await response.json();
+    let data = null;
+    let reached = false;
+    try {
+        const response = await fetch(`${API_URL}/models`);
+        // A response arriving is what proves the server is there, whatever it
+        // says — the same evidence the send paths use. An error body is still an
+        // answer, so it clears the banner even though it is unusable below.
+        reached = true;
+        data = await response.json();
+        // ApiExceptionHandler serialises a failure as perfectly good JSON, so a
+        // 500 parses cleanly and the catch never runs. Caching that would poison
+        // the payload an offline cold start depends on, and leave data.models
+        // undefined — and this runs first in the boot chain, unguarded, so the
+        // throw would take restoreDraft and the outbox replay down with it.
+        if (response.ok && Array.isArray(data?.models)) writeJson(MODELS_KEY, data);
+        else data = readJson(MODELS_KEY);
+    } catch (e) {
+        // Offline cold start: the cached payload keeps the model rail usable and,
+        // more importantly, gives a queued turn a model key to be replayed with.
+        data = readJson(MODELS_KEY);
+        console.warn('Could not reach /api/models; falling back to the cached payload:', e);
+    }
+    setServerReachable(reached);
+    // A cache written by an older build, or none at all, is no reason to strand
+    // the boot chain either.
+    if (!data || !Array.isArray(data.models)) return;
+
     models = data.models;
     effortLevels = data.effortLevels;
     currentModel = data.defaultModel;
@@ -740,24 +1195,40 @@ async function sendMessage() {
     attachButton.disabled = true;
 
     const isSpanishFirst = activeSetup === 'spanish';
-    addMessage(message, 'user', attachmentsSnapshot);
+    const userBubble = addMessage(message, 'user', attachmentsSnapshot);
 
     const loadingMessage = createLoadingMessage();
     chatMessages.appendChild(loadingMessage);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 
-    // Abort if the server doesn't respond within 6 minutes (server-side timeout is 5m).
+    // Built before the try so the catch can queue this exact body for a replay.
+    const body = {
+        message,
+        model: currentModel,
+        effort: currentEffort,
+        conversationId: currentConversationId,
+        // A connection can drop after the server has taken the turn and before
+        // the answer gets back — fetch() rejects with the same TypeError either
+        // way, so a replay is unavoidable and may be a duplicate. This id is how
+        // the server recognises the second copy and answers it with the first
+        // one's response instead of persisting the turn again.
+        clientTurnId: newId(),
+        ...(activeSetup === 'spanish' && { coachType: 'spanish', topic: selectedTopic }),
+    };
+    const payload = JSON.stringify(body);
+
+    // Abort if the server doesn't respond in time; see turnTimeoutMs.
     const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+    const abortTimer = setTimeout(() => controller.abort(), turnTimeoutMs());
+
+    // The try below also wraps parsing and rendering the answer, and a TypeError
+    // from there (a malformed question reaching buildQuizBlock, say) is
+    // indistinguishable from an unreachable host to isNetworkFailure. Only a
+    // failure raised while this is still false may be queued for replay — past
+    // that point the server has the turn and replaying it would double-post it.
+    let fetchSettled = false;
 
     try {
-        const payload = JSON.stringify({
-            message,
-            model: currentModel,
-            effort: currentEffort,
-            conversationId: currentConversationId,
-            ...(activeSetup === 'spanish' && { coachType: 'spanish', topic: selectedTopic }),
-        });
         let response;
         if (attachmentsSnapshot.length > 0) {
             const form = new FormData();
@@ -772,6 +1243,11 @@ async function sendMessage() {
                 signal: controller.signal,
             });
         }
+        fetchSettled = true;
+        // A phone that left the LAN but kept cellular never fires `online`
+        // (navigator.onLine stays true), so a response arriving is the only thing
+        // that can clear a banner an earlier failed send put up.
+        setServerReachable(true);
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             throw new Error(err.message || 'Request failed');
@@ -782,6 +1258,10 @@ async function sendMessage() {
 
         const data = await response.json();
         loadingMessage.remove();
+        // A turn queued from this same chat before it had an id is waiting for
+        // the one this send just minted; hand it over before the drain below
+        // reaches it, or it will mint a conversation of its own.
+        if (!body.conversationId) adoptMintedConversation(pendingChatKey, data.conversationId);
 
         if (isSpanishFirst) {
             activeSetup = null;
@@ -795,8 +1275,30 @@ async function sendMessage() {
             activateQuiz();
             if (isNew) loadConversations();
         }
+        // This send is the proof that the server is back, and on a phone that
+        // kept cellular it is the only proof there will be — `online` never
+        // fires. Anything still queued has been waiting for exactly this.
+        if (readOutbox().length) flushOutbox();
     } catch (error) {
         loadingMessage.remove();
+        // The server never saw this turn, so it can wait on disk and be replayed
+        // verbatim — the bubble stays on screen marked pending instead of the
+        // text bouncing back into the composer. Attachments are excluded: a File
+        // can't be serialized into the queue.
+        if (!fetchSettled && isNetworkFailure(error) && attachmentsSnapshot.length === 0 && message) {
+            setServerReachable(false);
+            // A queue that would not take the turn cannot replay it either, so the
+            // text falls through to the path below and goes back to the composer.
+            // Claiming it was queued would be the one way to lose it outright.
+            const queued = queueSend(body);
+            if (queued) {
+                userBubble.classList.add('pending');
+                userBubble._snapshot.outboxId = queued.id;
+                saveDraftNow();
+                return;
+            }
+            userBubble.remove();
+        }
         // Re-enable any quiz buttons that were disabled before the failed send,
         // so the user can still pick an answer without losing the question.
         chatMessages.querySelectorAll('.quiz-option:disabled')
@@ -1141,6 +1643,16 @@ function addMessage(content, type, attachments, sentences, question) {
     if (content) messageDiv.appendChild(buildCopyButton(content));
     chatMessages.appendChild(messageDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+    // Keep what this bubble was built from so the chat can be snapshotted for an
+    // offline reload. File/objectUrl don't survive JSON, so attachments collapse
+    // to the chip shape a restored bubble would render anyway.
+    messageDiv._snapshot = {
+        content, role: type, sentences, question,
+        attachments: attachments && attachments.map(a =>
+            ({ filename: a.file ? a.file.name : a.filename, kind: a.kind })),
+    };
+    saveDraftSoon();
+    return messageDiv;
 }
 
 function buildSentenceCards(sentences) {
@@ -1235,8 +1747,15 @@ function activateQuiz() {
 function startNewChat() {
     resetSetupState();
     currentConversationId = null;
+    // Turns queued from here belong to this chat, not to the unminted one the
+    // user just walked away from — even though both carry conversationId: null.
+    pendingChatKey = newChatKey();
     chatMessages.innerHTML = '';
     addMessage("New chat. Pick a model on the left and ask me anything.", 'assistant');
+    // After the welcome bubble, not before: addMessage schedules a deferred save
+    // that would otherwise rewrite the draft with it 300 ms later. Clearing here
+    // cancels that timer too, so an untouched new chat really does leave nothing.
+    clearDraft();
     highlightActiveConversation();
     setCoachRadio('none');
     coachNote.textContent = '';

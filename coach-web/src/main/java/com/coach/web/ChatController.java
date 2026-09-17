@@ -56,27 +56,31 @@ public class ChatController {
     private final ModelsConfig models;
     private final AttachmentService attachments;
     private final CoachService coachService;
+    private final TurnReplayGuard replayGuard;
 
     public ChatController(ClaudeClient claudeClient, ConversationStore store, ModelsConfig models,
-                          AttachmentService attachments, CoachService coachService) {
+                          AttachmentService attachments, CoachService coachService,
+                          TurnReplayGuard replayGuard) {
         this.claudeClient = claudeClient;
         this.store = store;
         this.models = models;
         this.attachments = attachments;
         this.coachService = coachService;
+        this.replayGuard = replayGuard;
     }
 
     /** Text-only chat turn (JSON body) — the original contract, unchanged. */
     @PostMapping(value = "/chat", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ChatResponse chat(@Valid @RequestBody ChatRequest request) {
-        return handle(request, List.of());
+        return replayGuard.once(request.clientTurnId(), request.conversationId(), () -> handle(request, List.of()));
     }
 
     /** Chat turn with file attachments (multipart): a JSON {@code request} part + {@code files}. */
     @PostMapping(value = "/chat", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ChatResponse chatMultipart(@Valid @RequestPart("request") ChatRequest request,
                                       @RequestPart(value = "files", required = false) MultipartFile[] files) {
-        return handle(request, files == null ? List.of() : List.of(files));
+        List<MultipartFile> parts = files == null ? List.of() : List.of(files);
+        return replayGuard.once(request.clientTurnId(), request.conversationId(), () -> handle(request, parts));
     }
 
     private ChatResponse handle(ChatRequest request, List<MultipartFile> files) {
