@@ -1,6 +1,6 @@
 // ── 文 documents mode (noam vocabulary platform) ─────────────────
-// Mode shell (T06) + Documentos tab list/upload (T07). T08 still owns the Cola
-// tab body. Plain script (no modules) loaded after script.js: it reuses
+// Mode shell (T06) + Documentos tab list/upload (T07) + Cola tab (T08). Plain
+// script (no modules) loaded after script.js: it reuses
 // script.js's top-level `function`/`let` bindings (API_URL, chatMessages,
 // spanishModeToggle, resetToSetup, setCoachRadio, activeSetup, GLYPH_LABELS, …)
 // and registers its own DOMContentLoaded listener, which runs after script.js's
@@ -9,6 +9,8 @@
 
 let noamConfig = null;      // {baseUrl, profileId} from GET /api/noam/config, cached once
 let noamProbe = null;       // in-flight probeNoamAvailability(), awaited by anything that needs noamConfig
+let noamTabsEl = null;      // the Documentos/Cola tab bar, so a non-click switch (Cola's back arrow) can update it too
+let noamLastActiveTab = 'documentos'; // survives leaving 文 mode entirely (e.g. into a quiz) and coming back
 
 const NOAM_UNAVAILABLE_TOOLTIP = 'noam no está disponible';
 
@@ -74,16 +76,14 @@ function enterNoamSetup() {
 
     const docsTab = noamTabButton('Documentos', 'documentos', panel, tabs);
     const queueTab = noamTabButton('Cola', 'cola', panel, tabs);
-    docsTab.classList.add('active');
-    panel.dataset.activeTab = 'documentos';
-
     tabs.appendChild(docsTab);
     tabs.appendChild(queueTab);
     shell.appendChild(tabs);
     shell.appendChild(panel);
     chatMessages.appendChild(shell);
 
-    activateNoamTab('documentos', panel);
+    noamTabsEl = tabs;
+    switchNoamTab(noamLastActiveTab, panel);
 }
 
 function noamTabButton(label, tabId, panel, tabs) {
@@ -92,12 +92,17 @@ function noamTabButton(label, tabId, panel, tabs) {
     btn.className = 'noam-tab';
     btn.dataset.tab = tabId;
     btn.textContent = label;
-    btn.addEventListener('click', () => {
-        tabs.querySelectorAll('.noam-tab').forEach(b => b.classList.toggle('active', b === btn));
-        panel.dataset.activeTab = tabId;
-        activateNoamTab(tabId, panel);
-    });
+    btn.addEventListener('click', () => switchNoamTab(tabId, panel));
     return btn;
+}
+
+// Shared by tab-button clicks and Cola's back arrow (T08): both need to flip the
+// active tab pixel, remember it for the next enterNoamSetup, and rebuild the panel.
+function switchNoamTab(tabId, panel) {
+    noamLastActiveTab = tabId;
+    if (noamTabsEl) noamTabsEl.querySelectorAll('.noam-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tabId));
+    panel.dataset.activeTab = tabId;
+    activateNoamTab(tabId, panel);
 }
 
 // ── T07: Documentos tab — list + upload ──────────────────────────
@@ -125,10 +130,9 @@ function activateNoamTab(tabId, panel) {
     if (tabId === 'documentos') {
         renderDocumentosTab(panel);
     } else {
-        // Cola tab body is T08's job — leave the pane empty for now, same as before T07.
         noamDocContent = null;
         noamDropError = null;
-        panel.innerHTML = '';
+        renderColaTab(panel);
     }
 }
 
@@ -319,10 +323,13 @@ async function fetchDocumentStudyItems(documentId, offset) {
     return items.map(it => ({ lexemeId: it.lexeme.id, spanish: it.lexeme.displayText, english: it.translation }));
 }
 
-function renderNoamItemList(panel, { title, onBack, loadPage, paging }) {
+function renderNoamItemList(panel, { title, onBack, loadPage, paging, emptyMessage }) {
     panel.innerHTML = '';
     noamStudyEntries = new Map();
-    noamStudyState = { loadPage, offset: 0, exhausted: false, loading: false, paging: !!paging };
+    noamStudyState = {
+        loadPage, offset: 0, exhausted: false, loading: false, paging: !!paging,
+        emptyMessage: emptyMessage || 'No hay palabras nuevas.',
+    };
 
     const header = document.createElement('div');
     header.className = 'noam-study-header';
@@ -437,7 +444,7 @@ function updateStudyEmptyState(list) {
     if (noamStudyEntries.size === 0) {
         const empty = document.createElement('p');
         empty.className = 'muted noam-study-empty';
-        empty.textContent = 'No hay palabras nuevas.';
+        empty.textContent = (noamStudyState && noamStudyState.emptyMessage) || 'No hay palabras nuevas.';
         list.appendChild(empty);
     }
 }
@@ -607,6 +614,35 @@ function showStudyListError(errorEl, message, onRetry) {
     retry.textContent = 'Reintentar';
     retry.addEventListener('click', onRetry);
     errorEl.appendChild(retry);
+}
+
+// ── T08: Cola tab — the profile's spaced-repetition study queue ──
+// Second source of study items: instead of a document's unknown words, it's
+// "words this profile is due to review", straight from noam's scheduler. Reuses
+// T09's renderNoamItemList/loadPage seam with paging:false (the endpoint has no
+// offset), so the row rendering, marks and Proceed hand-off are identical.
+
+function renderColaTab(panel) {
+    renderNoamItemList(panel, {
+        title: 'Cola',
+        onBack: () => switchNoamTab('documentos', panel),
+        paging: false,
+        loadPage: fetchQueueStudyItems,
+        emptyMessage: 'No hay palabras pendientes.',
+    });
+}
+
+// Normalises noam's study-queue entry ({lexeme, state, translation}) into the
+// same {lexemeId, spanish, english} triple fetchDocumentStudyItems produces.
+async function fetchQueueStudyItems() {
+    await noamProbe;
+    if (!noamConfig || !noamConfig.baseUrl) throw new Error('noam no está disponible.');
+    const url = `${noamConfig.baseUrl}/profiles/${noamConfig.profileId}/study-queue?limit=${NOAM_STUDY_LIMIT}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const items = Array.isArray(data) ? data : [];
+    return items.map(it => ({ lexemeId: it.lexeme.id, spanish: it.lexeme.displayText, english: it.translation }));
 }
 
 // ── T10: seed the 字 quiz from the noam study-item selection ──────
