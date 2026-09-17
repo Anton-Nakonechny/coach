@@ -594,9 +594,12 @@ function flushStudyMarksInBackground() {
     const sent = [];
     if (known.length > 0) sent.push(postNoamLexemeStates(known, 'KNOWN'));
     if (ignored.length > 0) sent.push(postNoamLexemeStates(ignored, 'IGNORED'));
-    // allSettled both handles the rejections (nothing else awaits these) and gives
-    // the next study-item read something to wait on that can never reject.
-    noamMarksFlush = Promise.allSettled(sent);
+    // Chained onto the flush before it rather than replacing it: a list rendered
+    // since that flush has no marks of its own, so its sent[] is empty and settles
+    // at once — a read waiting only on that would stop waiting for a POST still on
+    // the wire. allSettled both handles the rejections (nothing else awaits these)
+    // and gives the next study-item read something to wait on that can never reject.
+    noamMarksFlush = Promise.allSettled([noamMarksFlush, ...sent]);
     noamStudyEntries = null;
     noamStudyState = null;
 }

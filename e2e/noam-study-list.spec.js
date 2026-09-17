@@ -232,3 +232,43 @@ test('leaving a tab mid-load does not strand the study-list globals', async ({ p
 
     await expect.poll(() => page.evaluate(() => noamStudyEntries === null && noamStudyState === null)).toBe(true);
 });
+
+// Tab switches run the marks flush and the queue read back to back, and the read
+// waits on whatever flush the last switch left behind. A freshly rendered list has
+// no marks, so its flush sends nothing and settles at once — if that replaced the
+// promise instead of joining it, an earlier flush still on the wire stopped being
+// awaited and the queue GET could once more outrun the write it depends on.
+test('a tab switch with nothing to flush still waits for the flush in flight', async ({ page }) => {
+    const marked = new Set();
+    let releasePost;
+    await routeNoam(page, {
+        queueHandler: async route => {
+            const due = queueItems(2).filter(it => !marked.has(it.lexeme.id));
+            await route.fulfill({ contentType: 'application/json', body: JSON.stringify(due) });
+        },
+        onLexemeStates: async route => {
+            await new Promise(resolve => { releasePost = resolve; });
+            JSON.parse(route.request().postData()).lexemeIds.forEach(id => marked.add(id));
+            await route.fulfill({ status: 204, body: '' });
+        },
+    });
+    await enterNoam(page);
+    await page.click('.noam-tab[data-tab="cola"]');
+    await expect(page.locator('.noam-study-row')).toHaveCount(2);
+
+    await page.locator('.noam-study-row').first().locator('.noam-mark-known').click();
+    // Leaving sends the mark; the POST stays on the wire for the rest of the test.
+    await page.click('.noam-tab[data-tab="documentos"]');
+    await expect.poll(() => Boolean(releasePost)).toBe(true);
+    // Re-entering Cola builds a mark-free list, and leaving it flushes nothing.
+    await page.click('.noam-tab[data-tab="cola"]');
+    await page.click('.noam-tab[data-tab="documentos"]');
+    await page.click('.noam-tab[data-tab="cola"]');
+
+    // Long enough that a read no longer chained to the pending POST has fetched.
+    await page.waitForTimeout(300);
+    releasePost();
+
+    await expect(page.locator('.noam-study-row')).toHaveCount(1);
+    await expect(page.locator('.noam-study-row')).toContainText('palabra1');
+});
