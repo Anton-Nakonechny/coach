@@ -833,13 +833,44 @@ translateWords = function (words) {
 // uses) into the chat pane, with a short explainer above it. Picking a topic starts
 // the practice immediately — no separate confirm button.
 async function chooseTopicThenPractice(words) {
-    const topics = await enterTopicSetup({
+    // Load the topics BEFORE handing over to enterTopicSetup, which clears the pane
+    // up front and calls startNewChat() if its own fetch fails — that would take the
+    // graded-results screen (and pendingMissedWords with it) down on a transient
+    // /coaches/spanish/topics error, and those results are the only way back to the
+    // words just graded. Fetching here leaves the results untouched on failure, and
+    // passing the list as `cached` means enterTopicSetup's failure branch can't run.
+    let topics = spanishTopics;
+    if (!topics) {
+        try {
+            topics = await fetchTopics('/coaches/spanish/topics');
+        } catch (e) {
+            addError(e);
+            return;
+        }
+        spanishTopics = topics;
+    }
+
+    // This grid IS the 語 screen, so paint the glyph now rather than leaving it on 字
+    // until openConversation flips it once a topic is picked. preserveNoamSource
+    // because Hook #2 would otherwise clear the very cache this detour exists to
+    // carry into 語 and back.
+    setSpanishMode('language', { preserveNoamSource: true });
+    // Nothing is selected on this grid, but selectedTopic can still hold a pick from
+    // an earlier 語 setup — resetToSetup() (enterTopicSetup's teardown) only clears
+    // pixels, not dispatch state. Left set, a typed message would sail past
+    // sendMessage's "Elige un tema primero" guard and post a brand-new chat on a
+    // topic the user never picked here, silently dropping the missed words. Cleared,
+    // the guard asks for a topic. pendingMissedWords deliberately stays set: the 字
+    // glyph should still re-quiz these same words from this screen.
+    selectedTopic = null;
+
+    await enterTopicSetup({
         welcome: `Elige un tema para practicar las palabras falladas en modo ` +
             `<span data-tooltip="${GLYPH_LABELS['語']}">語</span>.`,
         setupName: 'spanish',
         endpoint: '/coaches/spanish/topics',
         gridId: 'topicGrid',
-        cached: spanishTopics,
+        cached: topics,
         render: renderSpanishTopicSections,
         // preserveNoamSource: startCoachChat's openConversation call would otherwise
         // clear noamWordSource (Hook #2 below) the moment the practice chat opens,
@@ -853,17 +884,46 @@ async function chooseTopicThenPractice(words) {
             topic,
         }, 'Failed to start practice', { preserveNoamSource: true }),
     });
-    if (topics) spanishTopics = topics;
 }
+
+// Set only for the duration of one selectSpanishMode dispatch — see Hook #5.
+let noamHandoff = null;
 
 // Hook #4: practiceMissed is the one function both the results screen's "語" button
 // and the glyph-toggle shortcut (selectSpanishMode) call to enter 語 — wrapping it
 // once here routes both through the topic screen whenever the missed words came
 // from noam, instead of patching each call site separately.
+//
+// The two callers disagree about ordering, hence noamHandoff: selectSpanishMode
+// paints the mode (setSpanishMode → Hook #2 → noamWordSource = null) *before*
+// dispatching here, so the glyph route arrives with the provenance already erased
+// while the results-button route still has it. Hook #5 snapshots it across that
+// paint and this restores it, because the words really are still noam's. A
+// hand-typed 字 quiz has no noamWordSource to snapshot (Hook #3 cleared it at
+// translate time), so it still falls straight through to topic-less practice.
 const practiceMissedTopicless = practiceMissed;
 practiceMissed = function (words) {
-    if (noamWordSource) { chooseTopicThenPractice(words); return; }
+    const source = noamWordSource || noamHandoff;
+    if (source) {
+        noamWordSource = source;
+        chooseTopicThenPractice(words);
+        return;
+    }
     practiceMissedTopicless(words);
+};
+
+// Hook #5: carry noamWordSource across selectSpanishMode's paint-then-dispatch, for
+// Hook #4 above. Scoped to that one synchronous dispatch and cleared in a finally,
+// so no later event can resurrect a provenance that legitimately went away — the
+// reason this is a snapshot rather than a weaker clear in Hook #2.
+const selectSpanishModeBase = selectSpanishMode;
+selectSpanishMode = function (mode) {
+    noamHandoff = noamWordSource;
+    try {
+        selectSpanishModeBase(mode);
+    } finally {
+        noamHandoff = null;
+    }
 };
 
 // ── Drag-and-drop onto the grid ───────────────────────────────

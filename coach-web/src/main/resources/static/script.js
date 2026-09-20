@@ -793,6 +793,18 @@ function enterWordsSetup() {
     activeSetup = 'spanish-words';
 }
 
+// Fetch one coach's topic list. Split out of enterTopicSetup because that function
+// wipes the pane before it fetches and calls startNewChat() on failure — fine for a
+// setup screen entered from a radio click, fatal for a caller whose current screen is
+// the only way back to its data (noam.js's chooseTopicThenPractice and its graded
+// results). Such a caller loads the topics itself first, then passes them as `cached`.
+async function fetchTopics(endpoint) {
+    const resp = await fetch(`${API_URL}${endpoint}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.message || 'Failed to load topics');
+    return data;
+}
+
 // Render a coach's topic grid, lazily fetching (and returning) its topic list.
 // Returns null if loading failed, so the caller keeps its existing cache.
 async function enterTopicSetup({ welcome, setupName, endpoint, gridId, cached, onPick, render = renderTopicGrid }) {
@@ -803,10 +815,7 @@ async function enterTopicSetup({ welcome, setupName, endpoint, gridId, cached, o
     let topics = cached;
     if (!topics) {
         try {
-            const resp = await fetch(`${API_URL}${endpoint}`);
-            const data = await resp.json();
-            if (!resp.ok) throw new Error(data.message || 'Failed to load topics');
-            topics = data;
+            topics = await fetchTopics(endpoint);
         } catch (e) {
             startNewChat();
             addError(e);
