@@ -824,6 +824,48 @@ translateWords = function (words) {
     return translateWordsViaLlm(words);
 };
 
+// ── T11: topic screen between the 字 results and 語 practice ─────
+// The normal 字→語 hand-off (practiceMissed) is topic-less, but a 文-sourced quiz's
+// vocabulary should get drilled through a chosen grammar structure, so this inserts
+// a topic pick between the results screen and the sentence-practice chat.
+
+// Renders the shared Spanish topic grid (same fetch/cache/render enterSpanishSetup
+// uses) into the chat pane, with a short explainer above it. Picking a topic starts
+// the practice immediately — no separate confirm button.
+async function chooseTopicThenPractice(words) {
+    const topics = await enterTopicSetup({
+        welcome: `Elige un tema para practicar las palabras falladas en modo ` +
+            `<span data-tooltip="${GLYPH_LABELS['語']}">語</span>.`,
+        setupName: 'spanish',
+        endpoint: '/coaches/spanish/topics',
+        gridId: 'topicGrid',
+        cached: spanishTopics,
+        render: renderSpanishTopicSections,
+        // preserveNoamSource: startCoachChat's openConversation call would otherwise
+        // clear noamWordSource (Hook #2 below) the moment the practice chat opens,
+        // the same loss practiceMissed's own preserveNoamSource already guards
+        // against on its topic-less route into 語.
+        onPick: (topic) => startCoachChat({
+            message: words.join(', '),
+            model: currentModel,
+            effort: currentEffort,
+            coachType: 'spanish',
+            topic,
+        }, 'Failed to start practice', { preserveNoamSource: true }),
+    });
+    if (topics) spanishTopics = topics;
+}
+
+// Hook #4: practiceMissed is the one function both the results screen's "語" button
+// and the glyph-toggle shortcut (selectSpanishMode) call to enter 語 — wrapping it
+// once here routes both through the topic screen whenever the missed words came
+// from noam, instead of patching each call site separately.
+const practiceMissedTopicless = practiceMissed;
+practiceMissed = function (words) {
+    if (noamWordSource) { chooseTopicThenPractice(words); return; }
+    practiceMissedTopicless(words);
+};
+
 // ── Drag-and-drop onto the grid ───────────────────────────────
 // Mirrors setupDragAndDrop()'s visual idiom from script.js (dragCounter + .drop-overlay
 // shown/hidden on dragenter/dragleave/drop) but scoped to the Documentos grid host

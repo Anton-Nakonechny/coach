@@ -731,8 +731,12 @@ async function onCoachSelected(value) {
 
 // Start (or fail to start) a coach conversation from a ready request body.
 // Refresh the sidebar first so the coach map knows the new conversation, then
-// open it (which also keeps the radio on the chosen coach).
-async function startCoachChat(body, errorLabel) {
+// open it (which also keeps the radio on the chosen coach). openOpts forwards
+// through to openConversation — e.g. noam.js's chooseTopicThenPractice passes
+// {preserveNoamSource: true} so the topic screen it inserts before this call
+// doesn't cost the noam lexemeId cache the same way practiceMissed already
+// protects its own (topic-less) route into 語.
+async function startCoachChat(body, errorLabel, openOpts) {
     activeSetup = null;
     setCoachRadiosDisabled(true);
     chatMessages.innerHTML = '';
@@ -751,7 +755,7 @@ async function startCoachChat(body, errorLabel) {
         }
         const data = await response.json();
         await loadConversations();
-        await openConversation(data.conversationId);
+        await openConversation(data.conversationId, openOpts);
     } catch (error) {
         startNewChat();
         addError(error);
