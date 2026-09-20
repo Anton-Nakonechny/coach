@@ -153,6 +153,15 @@ test('practicar en 語 then back to 字 still reseeds via noam, not the LLM tran
             body: JSON.stringify({ setId: 'llm-set', items: [{ english: 'shrewd', hint: 'a', spanish: 'astutos' }] }),
         });
     });
+    // T11 inserts a topic screen between the noam-sourced results and 語 practice
+    // (df532d0) — stub it the same way offline-draft.spec.js and outbox-replay.spec.js
+    // do, rather than relying on the real coaches/Spanish/temas-*.txt files on disk.
+    await page.route('**/api/coaches/spanish/topics', route =>
+        route.fulfill({
+            contentType: 'application/json',
+            body: JSON.stringify([{ level: 'A1', topics: ['viajes'] }]),
+        })
+    );
     await page.route('**/api/chat', async route => {
         await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ conversationId: 'convo-1' }) });
     });
@@ -180,8 +189,11 @@ test('practicar en 語 then back to 字 still reseeds via noam, not the LLM tran
     await page.locator('.word-answer').first().fill('wrong');
     await page.click('.word-check button:has-text("Comprobar")');
 
-    // "Practicar ... 語" — detour into sentence practice with the same missed word.
+    // "Practicar ... 語" — since df532d0 (T11) this now stops at a topic screen
+    // before the sentence-practice detour, rather than opening it directly; pick
+    // the (only) stubbed topic to continue with the same missed word.
     await page.click('.word-actions button:has-text("語")');
+    await page.locator('.topic-button', { hasText: 'viajes' }).click();
     await expect(page.locator('.sentence-cards')).toBeVisible();
 
     // Back to 字 — must still resolve lex-astutos via noam, not fall back to /translate.
