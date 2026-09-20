@@ -736,7 +736,11 @@ async function onCoachSelected(value) {
 // {preserveNoamSource: true} so the topic screen it inserts before this call
 // doesn't cost the noam lexemeId cache the same way practiceMissed already
 // protects its own (topic-less) route into 語.
-async function startCoachChat(body, errorLabel, openOpts) {
+// onFailure, if given, replaces the default startNewChat() recovery on a failed
+// POST — for a caller whose current screen is the only way back to data that
+// startNewChat's resetSetupState() would otherwise wipe (e.g. noam.js's
+// chooseTopicThenPractice and pendingMissedWords).
+async function startCoachChat(body, errorLabel, openOpts, onFailure) {
     activeSetup = null;
     setCoachRadiosDisabled(true);
     chatMessages.innerHTML = '';
@@ -757,7 +761,8 @@ async function startCoachChat(body, errorLabel, openOpts) {
         await loadConversations();
         await openConversation(data.conversationId, openOpts);
     } catch (error) {
-        startNewChat();
+        if (onFailure) onFailure();
+        else startNewChat();
         addError(error);
     } finally {
         setCoachRadiosDisabled(false);

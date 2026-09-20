@@ -882,7 +882,16 @@ async function chooseTopicThenPractice(words) {
             effort: currentEffort,
             coachType: 'spanish',
             topic,
-        }, 'Failed to start practice', { preserveNoamSource: true }),
+        }, 'Failed to start practice', { preserveNoamSource: true },
+        // On failure, land back on this same topic grid rather than startCoachChat's
+        // default startNewChat() — that clears pendingMissedWords via resetSetupState,
+        // and by this point enterTopicSetup has already replaced the graded-results
+        // screen, so there'd be no way back to the missed words at all. spanishTopics
+        // is cached by now, so this redraw doesn't refetch.
+        () => {
+            pendingMissedWords = words;
+            chooseTopicThenPractice(words);
+        }),
     });
 }
 
