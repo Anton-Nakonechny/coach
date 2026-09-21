@@ -64,14 +64,17 @@ test.describe('noam documents → 字 → 語 happy path', () => {
             await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ setId: 'x', items: [] }) });
         });
 
-        await page.route('**/api/spanish/words/check', route =>
-            route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+        let checkBody;
+        await page.route('**/api/spanish/words/check', async route => {
+            checkBody = JSON.parse(route.request().postData());
+            await route.fulfill({ contentType: 'application/json', body: JSON.stringify({
                 results: [
                     { english: 'word1', spanish: 'palabra1', correct: true, fullHint: false },  // green
                     { english: 'word2', spanish: 'palabra2', correct: true, fullHint: true },    // yellow
                     { english: 'word3', spanish: 'palabra3', correct: false, fullHint: false },  // red
                 ],
-            }) }));
+            }) });
+        });
 
         await page.route('**/api/coaches/spanish/topics', route =>
             route.fulfill({ contentType: 'application/json', body: JSON.stringify([
@@ -119,17 +122,33 @@ test.describe('noam documents → 字 → 語 happy path', () => {
         await expect(page.locator('.hint-icon').first()).toHaveAttribute('data-tooltip', /···$/);
         expect(translateCalled).toBe(false);
 
+        // Clicking row 1's hint escalates it to the full word, which is what makes its
+        // yellow grade below genuine rather than an artefact of the stub.
+        await page.locator('.hint-icon').nth(1).click();
+        await expect(page.locator('.hint-icon').nth(1)).toHaveAttribute('data-tooltip', 'palabra2');
+
         await page.locator('.word-answer').nth(0).fill('palabra1');
         await page.locator('.word-answer').nth(1).fill('palabra2');
         await page.locator('.word-answer').nth(2).fill('wrong');
         await page.click('.word-check button:has-text("Comprobar")');
 
-        // 5. The 語 button leads to the topic grid, not straight into a chat.
+        // 5. The typed answers and the clicked hint reach /check in row order.
+        await expect.poll(() => checkBody).toBeTruthy();
+        expect(checkBody.setId).toBe('set-1');
+        expect(checkBody.answers).toEqual(['palabra1', 'palabra2', 'wrong']);
+        expect(checkBody.hintsUsed).toEqual([false, true, false]);
+
+        // 6. Tri-state grading: green = correct, yellow = correct but full hint, red = wrong.
+        await expect(page.locator('.word-row').nth(0)).toHaveClass('word-row correct');
+        await expect(page.locator('.word-row').nth(1)).toHaveClass('word-row hinted');
+        await expect(page.locator('.word-row').nth(2)).toHaveClass('word-row incorrect');
+
+        // 7. The 語 button leads to the topic grid, not straight into a chat.
         await page.click('.word-actions button:has-text("語")');
         await expect(page.locator('.topic-button', { hasText: 'viajes' })).toBeVisible();
-        await expect(page.locator('.sentence-cards')).toHaveCount(0);
+        expect(chatBody).toBeUndefined();
 
-        // 6. Picking a tema posts /api/chat with coachType 'spanish', the topic, and
+        // 8. Picking a tema posts /api/chat with coachType 'spanish', the topic, and
         // only the missed (red ∪ yellow) words — not the clean-correct one.
         await page.locator('.topic-button', { hasText: 'viajes' }).click();
         await expect.poll(() => chatBody).toBeTruthy();
@@ -155,9 +174,11 @@ test.describe('noam unavailable', () => {
 
         await expect(page.locator('button.mode-btn[data-mode="documents"]')).toBeDisabled();
 
-        // 字 still works: switching to it shows the paste-words setup screen.
+        // 字 still works: switching to it shows the paste-words setup screen. Assert on
+        // that screen's own text — startNewChat's welcome line is already an
+        // .message.assistant before the click, so a bare presence check never fails.
         await page.click('button.mode-btn[data-mode="words"]');
-        await expect(page.locator('.message.assistant').first()).toBeVisible();
+        await expect(page.locator('.message.assistant').last()).toContainText('Escribe o pega palabras');
 
         // 語 still works: switching back renders the Spanish topic grid.
         await page.click('button.mode-btn[data-mode="language"]');
