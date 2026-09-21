@@ -70,7 +70,8 @@ UUIDs unless your local noam instance requires real ones.
   `QuizQuestion`, `QuizOption`). Needs `jackson-annotations` for the `@JsonValue`
   enums (`CoachType`, `ModelKey`); full Jackson comes from the app modules.
 - **`coach-web`** — REST API + static UI (port 9999). `anthropic/`, `attach/`,
-  `store/`, `web/` (controllers + request/response DTOs), `config/`
+  `noam/` (`NoamGateway`, the only class here that talks to noam), `store/`,
+  `web/` (controllers + request/response DTOs), `config/`
   (`AnthropicClientConfig`, `ApiKeyStartupCheck`), main `CoachWebApplication`.
 - **`coach-mcp`** — MCP server (port 9998). Just `mcp/` + main
   `CoachMcpApplication`; reuses `coach-core` and never touches the Anthropic
@@ -185,9 +186,45 @@ see the fix.
   `/api/chat {coachType:'spanish', message:words}` with no topic, seeding a persisted
   語 conversation with `OPENING_WITH_WORDS_NO_TOPIC`; "De nuevo 字" restarts a 字 quiz
   over all words.
+  **文 documents mode (noam-sourced, ephemeral):** a third Español mode that studies
+  vocabulary from **noam**, a sibling vocabulary-platform repo (REST API at
+  `http://localhost:8080/api/v1` in dev). Flow: the 文 screen (Documentos tab — noam's
+  documents, plus upload; Cola tab — the profile's spaced-repetition study queue) →
+  a per-document/per-queue study-item list with study/known/ignored triage → Proceed
+  flushes the triage marks to noam, then seeds a 字 quiz straight from the checked
+  items' own noam translations via `POST /api/spanish/words/seed` (no LLM call —
+  `SpanishWordController.seed` builds `WordPair`s from client-supplied
+  `{lexemeId, spanish, english}` triples) → grades post back to noam on `/check` → a
+  topic screen (the same grid `enterTopicSetup` uses) → 語 sentence practice on the
+  missed words only. `WordPair` gained a nullable `lexemeId` (noam's lexeme id, null
+  for a hand-typed list); ids live only in `WordSetStore` — 文 mode writes no JSONL
+  and no `.meta.json` sidecar, and nothing is persisted until a 語 chat is actually
+  started afterwards. Grading (`SpanishWordController.grade()`): correct with no hint
+  → `GOOD`, correct with the full hint revealed → `HARD`, wrong → `AGAIN`; every
+  graded `/check` call posts one review per lexeme-bearing word to noam via
+  `NoamGateway.recordReview` (`source: EXAM`), including re-quizzes — a noam outage
+  there is swallowed per word (logged, not thrown), since the set is single-use and
+  one failed post must not cost the grades of every word after it. Transport split:
+  reads (documents, study-items, the study queue) go browser→noam directly against
+  `coach.noam.base-url`; writes (lexeme-states, reviews) go browser→coach-web→noam
+  through `noam/NoamGateway` so noam's `userId` never reaches the browser —
+  `GET /api/noam/config` hands the client only `{baseUrl, profileId}`. Config:
+  `AppConfig.Noam` binds `coach.noam.base-url` / `profile-id` / `user-id`; both ids
+  are hardcoded for v1, pending a `GET /profiles/{id}` lookup in noam. Degradation:
+  if noam is unreachable (`GET /api/noam/config` fails, or the initial documents
+  probe does), the 文 glyph is disabled (`probeNoamAvailability` /
+  `disableDocumentsMode` in `noam.js`); a failed marks-flush on Proceed blocks it
+  (shows an error, keeps the list up) since a 502 must never silently drop triage.
+  Frontend split: `static/noam.js` holds all 文-mode JS, loaded after `script.js` in
+  `index.html` and reusing its top-level globals (`API_URL`, `chatMessages`,
+  `resetToSetup`, …); `script.js` itself keeps only the 語/字 flows. coach-web uses
+  only noam's pre-existing endpoints and enum values — noam also needs a CORS
+  allowance for the coach origin, tracked in the noam repo, not here.
 - **`web/ChatController`** + `ApiExceptionHandler` — the REST route handlers (`/api/chat`
-  has JSON + multipart overloads; the two 字 word routes live on `SpanishWordController`);
-  the handler maps
+  has JSON + multipart overloads; the three 字/文 word routes — `translate`, `seed`,
+  `check` — live on `SpanishWordController`, and the two noam routes —
+  `GET /api/noam/config`, `POST /api/noam/lexeme-states` — live on `web/NoamController`,
+  which delegates writes to `noam/NoamGateway`); the handler maps
   errors to `{"message": ...}` (FastAPI used `{"detail": ...}`) with idiomatic Spring
   codes (400 / 404 / 500 — Bean Validation failures return 400, where FastAPI returned 422).
 - **`web/TurnReplayGuard`** — both `/api/chat` overloads run through it. The browser's
@@ -213,19 +250,25 @@ see the fix.
   snake_case. The copied `script.js` was updated to match.
 - **Effort is not defaulted server-side** — a missing `effort` is simply not sent;
   the frontend seeds its own default from `/api/models` (`defaultEffort`).
+- **noam reads are browser-direct, writes go through `coach-web`** — a GET needs no
+  server involvement, but every write that could leak noam's `userId`
+  (lexeme-states, reviews) routes through `noam/NoamGateway` so the id never reaches
+  the browser; `GET /api/noam/config` hands the client only `{baseUrl, profileId}`.
 
 ## Testing approach (TDD)
 
 `coach-web/src/test/java/com/coach/ChatApiTest.java` is a black-box E2E suite
 (`@SpringBootTest(RANDOM_PORT)` + `TestRestTemplate`) running the whole owned stack
-for real, with JSONL persistence redirected to a JUnit temp dir. Only the two
-Anthropic boundaries are faked via `@MockitoBean` (`SdkAnthropicGateway` and
-`SdkFileUploadGateway`), driven with `doAnswer`/`doThrow` inline. Follow Red →
-Green → Refactor: write the failing test first, get sign-off, then implement.
+for real, with JSONL persistence redirected to a JUnit temp dir. Four boundaries
+are faked via `@MockitoBean` (`SdkAnthropicGateway`, `SdkFileUploadGateway`,
+`DocFetchGateway`, `NoamGateway`), driven with `doAnswer`/`doThrow` inline. Follow
+Red → Green → Refactor: write the failing test first, get sign-off, then implement.
 Most coverage lives in this E2E suite; prefer extending it over unit tests with
 heavy mocking. Exceptions are self-contained logic and boundary classes tested in
 isolation — `coach-web` `attach/MediaTypesTest` (pure function),
-`config/ApiKeyStartupCheckTest` (`ApplicationContextRunner`), and the `coach-core`
+`config/ApiKeyStartupCheckTest` (`ApplicationContextRunner`), `noam/NoamGatewayTest`
+(Mockito-free, an in-process `com.sun.net.httpserver.HttpServer`, mirroring
+`DocFetchGatewayTest`'s pattern), and the `coach-core`
 `docs/` trio — `DocsServiceTest`, `DocsCacheTest`, `DocFetchGatewayTest` (Mockito,
 `@TempDir`, in-process `com.sun.net.httpserver.HttpServer`). `coach-mcp`'s
 `McpApiTest` is the MCP-app E2E suite. `mvn test` at the root runs every module's
@@ -236,9 +279,10 @@ suite; scope to one with `-pl coach-web` / `-pl coach-mcp` / `-pl coach-core`.
 second, separate suite for that, run with `npx playwright test`. It boots the
 real `coach-web` app (`webServer` in the config) and drives the browser DOM
 directly — dispatch logic that lives only in the client (mode toggles, setup-screen
-state, the offline outbox) is exercised here, not in the Java suite. A change to
-either JS file is not verified until this suite has been run, even if `mvn test`
-and `node --check` both pass.
+state, the offline outbox) is exercised here, not in the Java suite; 文 mode's own
+specs are `noam-documents-flow.spec.js`, `noam-study-list.spec.js`, and
+`noam-word-source-cache.spec.js`. A change to either JS file is not verified until
+this suite has been run, even if `mvn test` and `node --check` both pass.
 
 ## Pull requests
 
