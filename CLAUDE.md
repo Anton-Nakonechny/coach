@@ -25,6 +25,7 @@ root dir so relative `coaches/` / `conversations/` / `.env.key` resolve.
 
 ```bash
 mvn test                           # run the whole reactor's JUnit 5 suites
+npx playwright test                # run the static-UI e2e suite (separate from mvn test)
 ./run.sh                           # coach-web (9999); Spring loads the key from .env.key
 ./run-mcp.sh                       # coach-mcp (9998); no API key needed
 mvn -pl coach-web test -Dtest=ChatApiTest#chatMintsConversationAndReturnsAnswer  # single test
@@ -229,6 +230,15 @@ isolation — `coach-web` `attach/MediaTypesTest` (pure function),
 `@TempDir`, in-process `com.sun.net.httpserver.HttpServer`). `coach-mcp`'s
 `McpApiTest` is the MCP-app E2E suite. `mvn test` at the root runs every module's
 suite; scope to one with `-pl coach-web` / `-pl coach-mcp` / `-pl coach-core`.
+
+**`mvn test` does not cover the static UI's client-side JS** (`script.js`,
+`noam.js`) — `e2e/*.spec.js` (Playwright, config at `playwright.config.js`) is a
+second, separate suite for that, run with `npx playwright test`. It boots the
+real `coach-web` app (`webServer` in the config) and drives the browser DOM
+directly — dispatch logic that lives only in the client (mode toggles, setup-screen
+state, the offline outbox) is exercised here, not in the Java suite. A change to
+either JS file is not verified until this suite has been run, even if `mvn test`
+and `node --check` both pass.
 
 ## Pull requests
 
