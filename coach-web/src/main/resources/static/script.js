@@ -12,16 +12,25 @@ let models = [];
 let effortLevels = [];
 let pendingAttachments = []; // [{id, file, kind, objectUrl?}]
 let conversationCoach = {};  // conversationId -> coachType slug ('none' for plain chats)
-let activeSetup = null;   // null | 'spanish' | 'spanish-words' | 'claude-architect' | 'noam'
+let activeSetup = null;   // null | 'spanish' | 'spanish-words' | 'claude-architect' | 'java' | 'noam'
 let selectedTopic = null;
 let spanishTopics = null;
 let certTopics = null;
+let javaTopicsCache = null;
+// Pure client-side flow tracking (no server-side "is this a question" parsing exists
+// for the Java coach): true only right after starting a topic/random question or
+// clicking "Next question" — consumed by the very next assistant reply's activateQuiz()
+// call, then reset. Never set on a reload/history open, so controls stay absent there.
+let javaAwaitingQuestion = false;
 let spanishMode = 'language';  // 'language' (語) | 'words' (字)
 let pendingMissedWords = null; // word list string for "practice missed" flow
 
 const SPANISH_WELCOME = 'Nuevo chat. Elige un modelo a la izquierda y un tema abajo, e introduce una lista de palabras para practicar.';
 const CLAUDE_WELCOME = 'New chat. Pick a topic below — I will quiz you with exam-style multiple-choice questions and explain every answer.';
+const JAVA_WELCOME = 'New chat. Pick a topic below, or Random question — I will ask interview-style Java questions one at a time and grade every answer.';
 const NEXT_QUESTION = 'Next question.';
+const JAVA_HINT = 'Give me a hint.';
+const JAVA_REVEAL = 'Reveal the answer.';
 const GLYPH_LABELS = { '語': 'language mode', '字': 'words mode', '文': 'documents mode' };
 
 marked.use({ renderer: { link(token) {
@@ -697,6 +706,7 @@ function resetSetupState() {
     activeSetup = null;
     selectedTopic = null;
     pendingMissedWords = null;
+    javaAwaitingQuestion = false;
 }
 
 async function onCoachSelected(value) {
@@ -718,6 +728,10 @@ async function onCoachSelected(value) {
     }
     if (value === 'claude-architect') {
         enterCertSetup();
+        return;
+    }
+    if (value === 'java') {
+        enterJavaSetup();
         return;
     }
 
@@ -896,6 +910,46 @@ function sendQuizReply(text) {
     if (chatInput.disabled) return;
     chatInput.value = text;
     sendMessage();
+}
+
+async function enterJavaSetup() {
+    const topics = await enterTopicSetup({
+        welcome: JAVA_WELCOME,
+        setupName: 'java',
+        endpoint: '/coaches/java/topics',
+        gridId: 'javaTopicGrid',
+        cached: javaTopicsCache,
+        render: renderJavaTopicGrid,
+        onPick: t => startJavaChat(t),
+    });
+    if (topics) javaTopicsCache = topics;
+}
+
+// The Java topic grid adds one extra button beyond the plain per-topic ones: a
+// global "Random question" pick (confirmed 2026-09-23, §4 Q2) that starts one of
+// the real topics at random and stays in it — no cross-topic pooling.
+function renderJavaTopicGrid(gridId, topics, onClick) {
+    renderTopicGrid(gridId, topics, onClick);
+    const randomBtn = document.createElement('button');
+    randomBtn.className = 'topic-button random-topic-button';
+    randomBtn.textContent = '🎲 Random question';
+    randomBtn.addEventListener('click', () => onClick(topics[Math.floor(Math.random() * topics.length)]));
+    document.getElementById(gridId).appendChild(randomBtn);
+}
+
+async function startJavaChat(topic) {
+    javaAwaitingQuestion = true;
+    // openConversation (which startCoachChat calls on success) runs resetSetupState()
+    // — which clears this same flag — right before it calls activateQuiz(), so the
+    // flag set above must be told to survive that reset; see the preserveJavaFlow
+    // handling in openConversation.
+    await startCoachChat({
+        message: '',
+        coachType: 'java',
+        topic,
+        model: currentModel,
+        effort: currentEffort,
+    }, 'Failed to start interview', { preserveJavaFlow: true });
 }
 
 // ── Attachment validation & state ────────────────────────────
@@ -1187,7 +1241,7 @@ async function sendMessage() {
         composerError.textContent = 'Elige un tema primero';
         return;
     }
-    if (activeSetup === 'claude-architect') {
+    if (activeSetup === 'claude-architect' || activeSetup === 'java') {
         composerError.textContent = 'Select a topic first';
         return;
     }
@@ -1736,12 +1790,24 @@ function buildQuizBlock(question) {
     return block;
 }
 
+// Dispatches to whichever coach owns the currently open conversation. Claude
+// Architect's controls key off the server-parsed `question` field (there's always
+// exactly one quiz-block per question reply); the Java coach has no such parsing
+// and relies entirely on javaAwaitingQuestion, set only by an explicit user action.
 function activateQuiz() {
-    // Remove any existing next-question rows
+    // Only Claude Architect's next-question-row is transient (rebuilt on every
+    // call based on whether the last message still has live options). A Java
+    // controls-row is appended at most once per question and must survive every
+    // later call — a follow-up reply, a hint, a reveal — so it isn't in this
+    // sweep; activateJavaControls() never appends a second one to the same bubble.
     chatMessages.querySelectorAll('.next-question-row').forEach(el => el.remove());
 
-    if ((conversationCoach[currentConversationId] || 'none') !== 'claude-architect') return;
+    const coach = conversationCoach[currentConversationId] || 'none';
+    if (coach === 'claude-architect') activateClaudeQuiz();
+    else if (coach === 'java') activateJavaControls();
+}
 
+function activateClaudeQuiz() {
     const assistantMessages = chatMessages.querySelectorAll('.message.assistant');
     if (!assistantMessages.length) return;
     const last = assistantMessages[assistantMessages.length - 1];
@@ -1758,6 +1824,61 @@ function activateQuiz() {
         row.appendChild(btn);
         last.querySelector('.message-content').appendChild(row);
     }
+}
+
+// Attaches the hint/reveal/next-question trio to the assistant reply that just
+// arrived, but only when it is the reply to an explicit "ask a question" action
+// (starting a topic, Random question, or clicking Next question) — never on a
+// plain follow-up reply, and never on a reload (the flag starts false and nothing
+// on the load path sets it true, per §4a #3 of the feature spec).
+function activateJavaControls() {
+    if (!javaAwaitingQuestion) return;
+    javaAwaitingQuestion = false;
+    const assistantMessages = chatMessages.querySelectorAll('.message.assistant');
+    if (!assistantMessages.length) return;
+    const last = assistantMessages[assistantMessages.length - 1];
+    last.querySelector('.message-content').appendChild(buildJavaControls());
+}
+
+// Hint and reveal are one-shot per question (confirmed 2026-09-23, §4 Q4): hint
+// disables only itself, reveal disables both. Next question is not one-shot —
+// sendQuizReply already no-ops while a send is in flight, so double-clicking it
+// can't double-post.
+function buildJavaControls() {
+    const row = document.createElement('div');
+    row.className = 'java-controls-row';
+
+    const hint = document.createElement('button');
+    hint.className = 'java-hint';
+    hint.textContent = '?';
+    hint.title = 'Give me a hint';
+    hint.addEventListener('click', () => {
+        hint.disabled = true;
+        sendQuizReply(JAVA_HINT);
+    });
+
+    const reveal = document.createElement('button');
+    reveal.className = 'java-reveal';
+    reveal.textContent = '☀️';
+    reveal.title = 'Reveal the answer';
+    reveal.addEventListener('click', () => {
+        hint.disabled = true;
+        reveal.disabled = true;
+        sendQuizReply(JAVA_REVEAL);
+    });
+
+    const next = document.createElement('button');
+    next.className = 'next-question';
+    next.textContent = 'Next question ▸';
+    next.addEventListener('click', () => {
+        javaAwaitingQuestion = true;
+        sendQuizReply(NEXT_QUESTION);
+    });
+
+    row.appendChild(hint);
+    row.appendChild(reveal);
+    row.appendChild(next);
+    return row;
 }
 
 // ── Conversations ─────────────────────────────────────────────
@@ -1792,6 +1913,24 @@ function claudeLogoIcon() {
     return svg;
 }
 
+// Small coffee-cup mark standing in for the "Java" word in java-coach history rows.
+function javaLogoIcon() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'java-logo-icon');
+    svg.setAttribute('width', '14');
+    svg.setAttribute('height', '14');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = `
+        <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              d="M4 9h13v6a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V9Z"></path>
+        <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              d="M17 10h1.5a2.5 2.5 0 0 1 0 5H17"></path>
+        <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+              d="M8 2c-.6.8-.6 1.4 0 2.2M12 2c-.6.8-.6 1.4 0 2.2"></path>`;
+    return svg;
+}
+
 async function loadConversations() {
     try {
         const response = await fetch(`${API_URL}/conversations`);
@@ -1815,6 +1954,10 @@ async function loadConversations() {
                 btn.classList.add('claude-chat');
                 btn.appendChild(claudeLogoIcon());
                 btn.appendChild(document.createTextNode(item.preview.replace(/^Claude\s*·\s*/, '')));
+            } else if (item.coachType === 'java') {
+                btn.classList.add('java-chat');
+                btn.appendChild(javaLogoIcon());
+                btn.appendChild(document.createTextNode(item.preview.replace(/^Java\s*·\s*/, '')));
             } else {
                 if (item.coachType === 'spanish') btn.classList.add('spanish-chat');
                 else if (item.coachType) btn.classList.add('coach-chat');
@@ -1892,6 +2035,11 @@ async function openConversation(conversationId, opts) {
         // preserveNoamSource) — every other caller omits it and behaves as before.
         setSpanishMode('language', opts);
         resetSetupState();
+        // resetSetupState() just cleared javaAwaitingQuestion — the one caller that
+        // needs it to survive into this activateQuiz() call (startJavaChat, via
+        // startCoachChat) opts back in explicitly, so every other caller (opening a
+        // conversation from history, a reload) keeps controls absent as intended.
+        if (opts && opts.preserveJavaFlow) javaAwaitingQuestion = true;
         activateQuiz();
     } catch (e) {
         console.error(e);

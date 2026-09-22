@@ -20,6 +20,7 @@
     --focus-ring: rgba(37, 99, 235, 0.2);
     --coach-accent: darkorange;
     --claude-accent: #eee2c7;
+    --java-accent: #5382A1;
 }
 
 body {
@@ -257,6 +258,17 @@ header { display: none; }
 .conversation-item.spanish-chat.active {
     border-color: #f1bf00;
     color: #f1bf00;
+}
+
+/* Java conversations: Java's long-standing "Duke blue" brand color */
+.conversation-item.java-chat {
+    color: var(--java-accent);
+    border-color: rgba(83, 130, 161, 0.45);
+}
+.conversation-item.java-chat:hover,
+.conversation-item.java-chat.active {
+    border-color: var(--java-accent);
+    color: var(--java-accent);
 }
 
 .muted { font-size: 0.825rem; color: var(--text-secondary); font-style: italic; }
@@ -997,6 +1009,33 @@ header { display: none; }
 .next-question-row { margin-top: 0.6rem; }
 .next-question { padding: 0.5rem 0.9rem; background: var(--surface); border: 1px solid var(--claude-accent); border-radius: 8px; color: var(--claude-accent); font-size: 0.875rem; cursor: pointer; }
 .next-question:hover { background: var(--surface-hover); }
+
+/* ── Java coach: sidebar icon + per-question hint/reveal/next controls ───── */
+.java-logo-icon {
+    display: inline-block;
+    vertical-align: -2px;
+    flex-shrink: 0;
+    margin-right: 6px;
+    color: var(--java-accent);
+}
+.java-controls-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.6rem; }
+.java-hint, .java-reveal {
+    flex-shrink: 0;
+    width: 1.6rem;
+    height: 1.6rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--java-accent);
+    border-radius: 50%;
+    background: transparent;
+    color: var(--java-accent);
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+.java-hint:hover, .java-reveal:hover { background: var(--surface-hover); }
+.java-hint:disabled, .java-reveal:disabled { cursor: default; opacity: 0.4; }
+.java-controls-row .next-question { border-color: var(--java-accent); color: var(--java-accent); margin-left: auto; }
 
 /* ── Offline draft + outbox ─────────────────────────────────── */
 

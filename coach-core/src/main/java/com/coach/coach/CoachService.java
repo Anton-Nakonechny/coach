@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static java.lang.String.format;
@@ -95,6 +96,48 @@ public class CoachService {
             asterisked or italicized action lines, and no other theatrical framing. Markdown \
             structure (headings, bold, lists) is fine for task briefs and feedback.""";
 
+    /** The synthetic first user turn of a Java interview chat. */
+    public static final String JAVA_OPENING_INSTRUCTION = "Ask me the first interview question.";
+
+    /** Opening turn directing the first question at one topic bullet: {@code %s} = bullet. */
+    private static final String JAVA_OPENING_WITH_BULLET =
+            JAVA_OPENING_INSTRUCTION + " Base it on this aspect of the topic:\n%s";
+
+    private static final String JAVA_PERSONA = """
+            You are a technical interviewer preparing a candidate for a Java backend
+            engineering interview. You quiz the candidate one question at a time,
+            drawing from the topic material below, and grade every answer.
+
+            Question rules:
+            - Ask realistic interview-style questions grounded in the topic material,
+              one at a time; treat the material as a pool to draw from, not a script
+              to recite verbatim.
+            - Never repeat a question already asked in this conversation.
+            - The candidate answers in free text — there is no fixed answer format.
+
+            Grading an answer:
+            - Reply in normal prose stating whether the answer is correct and why,
+              in plain technical language. Never use praise or affirmation language
+              such as "Correct!" or "Great job!" — state the fact and move on.
+            - After grading, you may continue the conversation naturally: answer
+              follow-up questions, go deeper on related concepts, or discuss side
+              topics the candidate raises. Do not pose a new question yourself.
+            - Only ask the next question when the candidate writes "Next question."
+
+            When asked "Give me a hint.": give one indirect reference or analogy for
+            the information the current question is asking about. Never reveal the
+            answer itself in a hint.
+
+            When asked "Reveal the answer.": state the correct/model answer directly,
+            then remain open for follow-up clarification.
+
+            When the candidate writes "Next question.", reply with ONLY the next
+            question — no other text.""";
+
+    /** Java topic files, e.g. {@code 01 Java Core.md}: two digits, a space, then the topic. */
+    private static final Pattern JAVA_TOPIC_FILE =
+            Pattern.compile("^\\d{2} (.+)\\.md$", Pattern.CASE_INSENSITIVE);
+
     private final Path coachesDir;
     private final DocsService docsService;
 
@@ -165,6 +208,27 @@ public class CoachService {
     }
 
     /**
+     * Validate topic membership and return the meta for a new Java interview conversation.
+     * Unlike Claude Architect, the topic id (e.g. {@code "Java Core"}) has had its filename's
+     * {@code NN } sort prefix stripped, so the matching file must be re-located by name.
+     */
+    public CoachMeta startJava(String topic) {
+        if (!javaTopics().contains(topic))
+            throw new InvalidRequestException("Unknown Java topic: " + topic);
+        Path dir = coachDir(CoachType.JAVA);
+        try (Stream<Path> files = Files.list(dir)) {
+            Path match = files
+                    .filter(CoachService::eligible)
+                    .filter(p -> stripJavaTopicPrefix(p.getFileName().toString()).equals(topic))
+                    .findFirst()
+                    .orElseThrow();
+            return new CoachMeta(CoachType.JAVA, match.getFileName().toString(), null);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
      * Opening user turn for a new Claude Architect quiz: the plain instruction plus a
      * randomly chosen {@code - } bullet of the topic file, so first questions spread
      * over the whole blueprint instead of converging on the model's modal pick.
@@ -177,6 +241,21 @@ public class CoachService {
                 .toList();
         if (bullets.isEmpty()) return CLAUDE_OPENING_INSTRUCTION;
         return format(CLAUDE_OPENING_WITH_BULLET,
+                bullets.get(ThreadLocalRandom.current().nextInt(bullets.size())));
+    }
+
+    /**
+     * Opening user turn for a new Java interview: the plain instruction plus a randomly
+     * chosen {@code - } bullet of the topic file, mirroring {@link #claudeOpeningInstruction}.
+     * Topics without bullets fall back to the plain instruction.
+     */
+    public String javaOpeningInstruction(CoachMeta meta) {
+        var bullets = readTopicLines(scenarioPath(meta)).stream()
+                .filter(line -> line.startsWith("- "))
+                .map(line -> line.substring(2).strip())
+                .toList();
+        if (bullets.isEmpty()) return JAVA_OPENING_INSTRUCTION;
+        return format(JAVA_OPENING_WITH_BULLET,
                 bullets.get(ThreadLocalRandom.current().nextInt(bullets.size())));
     }
 
@@ -241,6 +320,7 @@ public class CoachService {
         var persona = switch (meta.coachType()) {
             case CHIEF_OPERATING_OFFICER -> COO_PERSONA;
             case CLAUDE_ARCHITECT -> CLAUDE_PERSONA;
+            case JAVA -> JAVA_PERSONA;
             case SPANISH, NONE -> throw new IllegalStateException(
                     "No file-based persona for coach " + meta.coachType());
         };
@@ -336,8 +416,39 @@ public class CoachService {
             case CHIEF_OPERATING_OFFICER -> coachesDir.resolve("Chief Operating Officer");
             case SPANISH -> coachesDir.resolve("Spanish");
             case CLAUDE_ARCHITECT -> coachesDir.resolve("Claude");
+            case JAVA -> coachesDir.resolve("Java");
             case NONE -> throw new IllegalArgumentException("No coach directory for NONE");
         };
+    }
+
+    /**
+     * Topics from {@code coaches/Java/*.md} files (README and dotfiles excluded), sorted by
+     * filename (the {@code NN } prefix controls that order) and returned with the prefix
+     * stripped — the topic id sent to/from the API and shown on a button is just the name.
+     */
+    public List<String> javaTopics() {
+        Path dir = coachDir(CoachType.JAVA);
+        try (Stream<Path> files = Files.list(dir)) {
+            var topics = files
+                    .filter(CoachService::eligible)
+                    .sorted()
+                    .map(p -> stripJavaTopicPrefix(p.getFileName().toString()))
+                    .toList();
+            if (topics.isEmpty())
+                throw new IllegalStateException("No Java topics found: " + dir);
+            return topics;
+        } catch (IOException e) {
+            throw new IllegalStateException("No Java topics found: " + dir, e);
+        }
+    }
+
+    /** Strip a {@code NN } sort prefix from a Java topic filename; fails loudly if absent. */
+    private static String stripJavaTopicPrefix(String filename) {
+        var m = JAVA_TOPIC_FILE.matcher(filename);
+        if (!m.matches())
+            throw new IllegalStateException(
+                    "Java topic file name must start with two digits and a space: " + filename);
+        return m.group(1);
     }
 
     // ── 字 word-quiz helpers ─────────────────────────────────────────────────── //

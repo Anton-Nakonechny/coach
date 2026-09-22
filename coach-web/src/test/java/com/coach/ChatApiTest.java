@@ -1377,6 +1377,178 @@ class ChatApiTest {
         assertThat(gatewayCalls).isEmpty();
     }
 
+    // ── Java Interview Coach: topic-grid interview chats ─────────────────── //
+
+    private static Path javaDir() {
+        return COACHES_DIR.resolve("Java");
+    }
+
+    private static void writeJavaPrompt(String name, String content) throws IOException {
+        var dir = javaDir();
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve(name), content, UTF_8);
+    }
+
+    /** New-Java-chat body; topic omitted when null. */
+    private static Map<String, Object> javaBody(String topic) {
+        Map<String, Object> body = chatBody("", "sonnet-4-6", null, null);
+        body.put("coachType", "java");
+        if (topic != null) body.put("topic", topic);
+        return body;
+    }
+
+    @Test
+    void javaTopicsEndpointStripsNumericPrefixAndSortsByFile() throws IOException {
+        writeJavaPrompt("02 Multithreading and Concurrency.md", "content");
+        writeJavaPrompt("01 Java Core.md", "content");
+        writeJavaPrompt("README.md", "index");
+
+        var resp = rest.getForEntity(url("/api/coaches/java/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = json(resp);
+        assertThat(body.isArray()).isTrue();
+        assertThat(body).hasSize(2);
+        assertThat(body.get(0).asText()).isEqualTo("Java Core");
+        assertThat(body.get(1).asText()).isEqualTo("Multithreading and Concurrency");
+    }
+
+    @Test
+    void javaTopicsEndpointWithMissingDirReturns500() {
+        var resp = rest.getForEntity(url("/api/coaches/java/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).contains("topics");
+    }
+
+    @Test
+    void javaTopicFileMustStartWithTwoDigitsAndSpaceOrTopicsFail500() throws IOException {
+        writeJavaPrompt("BadName.md", "content");
+
+        var resp = rest.getForEntity(url("/api/coaches/java/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @Test
+    void javaChatStartsInterviewWithPersonaAndTopicPrompt() throws IOException {
+        writeJavaPrompt("01 Java Core.md", "STRING_POOL_DRILL");
+
+        var resp = postChat(javaBody("Java Core"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("interview");
+        assertThat(call.system()).contains("STRING_POOL_DRILL");
+        assertThat(roles(call)).containsExactly("user");
+        assertThat(textOf(lastUserMessage())).isEqualTo("Ask me the first interview question.");
+
+        var cid = json(resp).get("conversationId").asText();
+        var history = rest.getForEntity(url("/api/conversations/" + cid), String.class);
+        assertThat(json(history).get(0).get("content").asText()).isEqualTo("Ask me the first interview question.");
+    }
+
+    @Test
+    void javaChatPersistsPromptFileMetaSidecar() throws IOException {
+        writeJavaPrompt("01 Java Core.md", "content");
+
+        var resp = postChat(javaBody("Java Core"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var cid = json(resp).get("conversationId").asText();
+        var meta = store.coachMeta(cid);
+        assertThat(meta).isPresent();
+        assertThat(meta.get().coachType().value()).isEqualTo("java");
+        assertThat(meta.get().promptFile()).isEqualTo("01 Java Core.md");
+        assertThat(meta.get().topic()).isNull();
+    }
+
+    @Test
+    void javaConversationListItemShowsTopicPreview() throws IOException {
+        writeJavaPrompt("01 Java Core.md", "content");
+
+        postChat(javaBody("Java Core"));
+
+        var list = rest.getForEntity(url("/api/conversations"), String.class);
+        var item = json(list).get(0);
+        assertThat(item.get("preview").asText()).isEqualTo("Java · Java Core");
+        assertThat(item.get("coachType").asText()).isEqualTo("java");
+    }
+
+    @Test
+    void javaFollowUpIsPassthroughWithPersonaSystemPrompt() throws IOException {
+        writeJavaPrompt("01 Java Core.md", "STRING_POOL_DRILL");
+
+        var startResp = json(postChat(javaBody("Java Core")));
+        var cid = startResp.get("conversationId").asText();
+
+        var followUp = chatBody("Next question.", "sonnet-4-6", null, cid);
+        postChat(followUp);
+
+        var call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("interview");
+        assertThat(call.system()).contains("STRING_POOL_DRILL");
+        assertThat(roles(call)).containsExactly("user", "assistant", "user");
+        assertThat(textOf(lastUserMessage())).isEqualTo("Next question.");
+    }
+
+    @Test
+    void javaChatWithoutTopicReturns400() throws IOException {
+        writeJavaPrompt("01 Java Core.md", "content");
+
+        var resp = postChat(javaBody(null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("topic");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void javaChatWithUnknownTopicReturns400() throws IOException {
+        writeJavaPrompt("01 Java Core.md", "content");
+
+        var resp = postChat(javaBody("No such topic"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("No such topic");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+    }
+
+    @Test
+    void javaChatWithNonBlankMessageReturns400() throws IOException {
+        writeJavaPrompt("01 Java Core.md", "content");
+        var body = javaBody("Java Core");
+        body.put("message", "hi");
+
+        var resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("blank");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+    }
+
+    @Test
+    void javaChatOnExistingConversationReturns400() throws IOException {
+        writeJavaPrompt("01 Java Core.md", "content");
+        var body = javaBody("Java Core");
+        body.put("conversationId", "existing123");
+
+        var resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("new chat");
+    }
+
+    @Test
+    void javaChatWithMissingPromptsDirReturns500() {
+        var resp = postChat(javaBody("Java Core"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+        assertThat(gatewayCalls).isEmpty();
+    }
+
     // ── Direct each new quiz's first question at a random topic bullet ── //
 
     private static final List<String> QUIZ_BULLETS = List.of(
