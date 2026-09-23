@@ -62,7 +62,15 @@ function withBillingLink(message) {
 }
 
 function addError(error, retryHint = '') {
-    addMessage(withBillingLink(`Error: ${humanizeError(error)}${retryHint}`), 'assistant');
+    const bubble = addMessage(withBillingLink(`Error: ${humanizeError(error)}${retryHint}`), 'assistant');
+    // Rendered as an assistant bubble like any other, which is a problem for the one
+    // consumer that keys off "the last assistant bubble": most addError callers run
+    // activateQuiz() right behind, and the Java coach's one-shot javaAwaitingQuestion
+    // would be spent here — stapling the failed turn's controls onto the error while
+    // the retry's real question arrives bare. Marked so activateJavaControls can pass
+    // over it without consuming the flag.
+    bubble.classList.add('error-bubble');
+    return bubble;
 }
 
 // DOM elements
@@ -383,11 +391,15 @@ function readOutbox() {
  * it from, and a bubble marked `pending` would be promising a send that can
  * never happen — the caller has to be told so it can hand the text back instead.
  */
-function queueSend(body) {
+function queueSend(body, javaAwaiting = false) {
     const item = {
         id: newId(),
         queuedAt: Date.now(),
         chatKey: body.conversationId || pendingChatKey,
+        // javaAwaitingQuestion is global and one-shot, so a turn that leaves for the
+        // queue has to take it along: left set, an unrelated direct send's answer
+        // would spend it, and the replayed question would arrive with no controls.
+        ...(javaAwaiting && { javaAwaiting: true }),
         body,
     };
     return writeJson(OUTBOX_KEY, [...readOutbox(), item]) ? item : null;
@@ -549,6 +561,7 @@ function failQueued(item, error) {
         const typed = chatInput.value;
         chatInput.value = typed ? `${item.body.message}\n\n${typed}` : item.body.message;
         autoResize();
+        if (item.javaAwaiting) javaAwaitingQuestion = true;
         addError(error, typed
             ? ' Retry: your message has been restored above the draft you were typing — edit and press Enter.'
             : ' Retry: your message has been restored — press Enter to send again.');
@@ -575,7 +588,11 @@ function settleQueued(item, data) {
     // answers, which is also the order snapshotMessages then persists.
     const answer = addMessage(data.answer, 'assistant', null, data.sentences, data.question);
     bubble.after(answer);
-    activateQuiz();
+    // The token this turn carried into the queue comes back with its answer — and
+    // that answer was moved up under its own turn, so it need not be the last
+    // assistant bubble in the pane: activateQuiz is told which bubble it is.
+    if (item.javaAwaiting) javaAwaitingQuestion = true;
+    activateQuiz(answer);
     saveDraftNow();
 }
 
@@ -906,10 +923,14 @@ async function startCertChat(topic) {
     }, 'Failed to start quiz');
 }
 
+// Returns whether the turn was actually sent: a click landing while an earlier
+// send is still in flight does nothing, and its caller's one-shot state (the Java
+// coach's flag, a hint button's own disable) must not be spent on a non-send.
 function sendQuizReply(text) {
-    if (chatInput.disabled) return;
+    if (chatInput.disabled) return false;
     chatInput.value = text;
     sendMessage();
+    return true;
 }
 
 async function enterJavaSetup() {
@@ -1362,8 +1383,9 @@ async function sendMessage() {
             // A queue that would not take the turn cannot replay it either, so the
             // text falls through to the path below and goes back to the composer.
             // Claiming it was queued would be the one way to lose it outright.
-            const queued = queueSend(body);
+            const queued = queueSend(body, javaAwaitingQuestion);
             if (queued) {
+                javaAwaitingQuestion = false;
                 userBubble.classList.add('pending');
                 userBubble._snapshot.outboxId = queued.id;
                 saveDraftNow();
@@ -1794,17 +1816,21 @@ function buildQuizBlock(question) {
 // Architect's controls key off the server-parsed `question` field (there's always
 // exactly one quiz-block per question reply); the Java coach has no such parsing
 // and relies entirely on javaAwaitingQuestion, set only by an explicit user action.
-function activateQuiz() {
+// `javaTarget` names the bubble the Java controls belong on, for the one caller
+// whose answer isn't the last assistant bubble in the pane (settleQueued moves a
+// replayed answer up under its own turn); everyone else lets it default.
+function activateQuiz(javaTarget) {
     // Only Claude Architect's next-question-row is transient (rebuilt on every
     // call based on whether the last message still has live options). A Java
     // controls-row is appended at most once per question and must survive every
     // later call — a follow-up reply, a hint, a reveal — so it isn't in this
-    // sweep; activateJavaControls() never appends a second one to the same bubble.
+    // sweep; activateJavaControls() refuses to append a second one to a bubble
+    // that already has one.
     chatMessages.querySelectorAll('.next-question-row').forEach(el => el.remove());
 
     const coach = conversationCoach[currentConversationId] || 'none';
     if (coach === 'claude-architect') activateClaudeQuiz();
-    else if (coach === 'java') activateJavaControls();
+    else if (coach === 'java') activateJavaControls(javaTarget);
 }
 
 function activateClaudeQuiz() {
@@ -1831,19 +1857,32 @@ function activateClaudeQuiz() {
 // (starting a topic, Random question, or clicking Next question) — never on a
 // plain follow-up reply, and never on a reload (the flag starts false and nothing
 // on the load path sets it true, per §4a #3 of the feature spec).
-function activateJavaControls() {
+function activateJavaControls(target) {
     if (!javaAwaitingQuestion) return;
-    javaAwaitingQuestion = false;
     const assistantMessages = chatMessages.querySelectorAll('.message.assistant');
-    if (!assistantMessages.length) return;
-    const last = assistantMessages[assistantMessages.length - 1];
-    last.querySelector('.message-content').appendChild(buildJavaControls());
+    const host = target || assistantMessages[assistantMessages.length - 1];
+    if (!host) return;
+    // The question this flow is waiting for hasn't arrived yet — this is the report
+    // that it failed — so the token stays armed for the retry that replaces it.
+    if (host.classList.contains('error-bubble')) return;
+    javaAwaitingQuestion = false;
+    // Every path that arms the token is expected to produce exactly one question, so
+    // a bubble that already carries a row means the token was stale; spending it is
+    // what stops it from leaking onto a later reply.
+    if (host.querySelector('.java-controls-row')) return;
+    // One live row at a time. Earlier rows stay on screen under the questions they
+    // belong to (the reveal is part of that transcript), but their buttons post into
+    // the conversation as it is *now* — an old hint would be answered against the
+    // current question and would hand out a hint the budget already spent.
+    chatMessages.querySelectorAll('.java-controls-row button').forEach(b => { b.disabled = true; });
+    host.querySelector('.message-content').appendChild(buildJavaControls());
 }
 
 // Hint and reveal are one-shot per question (confirmed 2026-09-23, §4 Q4): hint
-// disables only itself, reveal disables both. Next question is not one-shot —
-// sendQuizReply already no-ops while a send is in flight, so double-clicking it
-// can't double-post.
+// disables only itself, reveal disables both — but only once the reply is really on
+// its way, so a click swallowed by an in-flight send costs nothing. Next question is
+// not one-shot; sendQuizReply no-ops while a send is in flight, so double-clicking
+// it can't double-post either.
 function buildJavaControls() {
     const row = document.createElement('div');
     row.className = 'java-controls-row';
@@ -1853,8 +1892,7 @@ function buildJavaControls() {
     hint.textContent = '?';
     hint.title = 'Give me a hint';
     hint.addEventListener('click', () => {
-        hint.disabled = true;
-        sendQuizReply(JAVA_HINT);
+        if (sendQuizReply(JAVA_HINT)) hint.disabled = true;
     });
 
     const reveal = document.createElement('button');
@@ -1862,17 +1900,19 @@ function buildJavaControls() {
     reveal.textContent = '☀️';
     reveal.title = 'Reveal the answer';
     reveal.addEventListener('click', () => {
+        if (!sendQuizReply(JAVA_REVEAL)) return;
         hint.disabled = true;
         reveal.disabled = true;
-        sendQuizReply(JAVA_REVEAL);
     });
 
     const next = document.createElement('button');
     next.className = 'next-question';
     next.textContent = 'Next question ▸';
     next.addEventListener('click', () => {
-        javaAwaitingQuestion = true;
-        sendQuizReply(NEXT_QUESTION);
+        // Armed only on the path that really sends. sendMessage() is async and gets
+        // no further than its first await before this returns, so arming it here is
+        // still well ahead of the answer that consumes it.
+        if (sendQuizReply(NEXT_QUESTION)) javaAwaitingQuestion = true;
     });
 
     row.appendChild(hint);
