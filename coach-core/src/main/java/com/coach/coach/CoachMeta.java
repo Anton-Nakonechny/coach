@@ -12,6 +12,8 @@ public record CoachMeta(CoachType coachType, String promptFile, String topic) {
             // A topic-less Spanish chat (字 word-list practice) has no topic to show.
             case SPANISH -> topic == null || topic.isBlank() ? "Vocabulario" : topic;
             case CLAUDE_ARCHITECT -> stem;
+            // The numeric sort prefix (e.g. "01 ") must never reach the screen.
+            case JAVA -> stem.replaceFirst("^\\d{2} ", "");
             default -> stem.replaceFirst("^\\d+-", "").replace('-', ' ');
         };
         return coachType.shortLabel() + " · " + suffix;
