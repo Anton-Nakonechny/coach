@@ -11,6 +11,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -29,12 +30,19 @@ public class NoamGateway implements AutoCloseable {
     /** noam's {@code lexemeIds} maxItems for the bulk lexeme-states call. */
     private static final int MAX_CHUNK = 500;
 
+    /** How long a cached {@link #isAvailable()} outcome is trusted before re-probing. */
+    private static final Duration PROBE_TTL = Duration.ofSeconds(60);
+
+    /** Connect/read budget for the availability probe — runs inside a user-facing turn. */
+    private static final Duration PROBE_TIMEOUT = Duration.ofSeconds(2);
+
     private final HttpClient client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 
     private final AppConfig.Noam config;
     private final ObjectMapper mapper;
+    private volatile Probe probe;
 
     public NoamGateway(AppConfig config, ObjectMapper mapper) {
         this.config = config.noam();
@@ -44,6 +52,37 @@ public class NoamGateway implements AutoCloseable {
     private record LexemeStatesBody(List<String> lexemeIds, String state, String source) { }
 
     private record ReviewBody(String lexemeId, String grade, String source) { }
+
+    private record Probe(Instant checkedAt, boolean ok) { }
+
+    /** Whether noam is configured and reachable. Never throws; false on any doubt. */
+    public boolean isAvailable() {
+        if (config.baseUrl().isBlank()) return false;
+        if (config.userId().isBlank()) return false;
+
+        var cached = probe;
+        if (cached != null && Duration.between(cached.checkedAt(), Instant.now()).compareTo(PROBE_TTL) < 0)
+            return cached.ok();
+
+        var fresh = new Probe(Instant.now(), probeReachable());
+        probe = fresh;
+        return fresh.ok();
+    }
+
+    private boolean probeReachable() {
+        try {
+            var request = HttpRequest.newBuilder(URI.create(config.baseUrl() + "/documents?language=es"))
+                    .timeout(PROBE_TIMEOUT)
+                    .GET()
+                    .build();
+            return client.send(request, HttpResponse.BodyHandlers.discarding()).statusCode() / 100 == 2;
+        } catch (IOException e) {
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
 
     /** Bulk-set lexeme states. Chunks at 500 ids (noam's maxItems). No-op on an empty list. */
     public void setLexemeStates(List<String> lexemeIds, String state) {
