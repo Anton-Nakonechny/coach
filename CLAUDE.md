@@ -182,10 +182,37 @@ see the fix.
   returning `{results:[{english,spanish,correct,fullHint}]}`. Client tri-state: green =
   correct & no hint, yellow = correct but full hint, red = wrong; the review set carried
   into the next practice = red ∪ yellow (only clean-correct words drop). Neither endpoint
-  writes JSONL or meta.json. The "practice missed" button (and the 語/字 toggle) POST
+  writes JSONL or meta.json. `/translate` also backfills each pair's `WordPair.lexemeId`:
+  `SpanishWordController.withLexemeIds` upserts the whole batch in noam via
+  `NoamGateway.createLexemes` before the shuffle (so pairs and drafts stay positionally
+  aligned), skipped entirely — not even an HTTP call — when `noamGateway.isAvailable()` is
+  false. This is why a **hand-typed** 字 quiz now reports grades to noam on `/check` just
+  like a 文-seeded one; `lexemeId` is no longer "null for a hand-typed list". The "practice
+  missed" button (and the 語/字 toggle) POST
   `/api/chat {coachType:'spanish', message:words}` with no topic, seeding a persisted
   語 conversation with `OPENING_WITH_WORDS_NO_TOPIC`; "De nuevo 字" restarts a 字 quiz
   over all words.
+  **語 verdict reporting (noam-gated):** when `NoamGateway.isAvailable()`, every turn's
+  system prompt for a `SPANISH` conversation gets `spanishVerdicts=true`
+  (`ChatController` → `CoachService.systemPrompt(meta, true)`), which appends
+  `SPANISH_VERDICT_INSTRUCTION` to the persona — instructing the tutor, on a *correction*
+  reply only (never a new-sentences reply), to end with a line-for-line
+  `===EVALUACIÓN===` block: one `(hint) CORRECTO|PARCIAL|INCORRECTO` line per corrected
+  sentence. `coach/VerdictParser.parse()` (coach-core) splits the reply at that marker
+  line, mapping `CORRECTO`→`GOOD`, `PARCIAL`→`HARD`, `INCORRECTO`→`AGAIN`; a missing or
+  malformed block degrades to "no verdicts" rather than a broken reply, and a
+  verdict-only reply (nothing left after stripping) falls back to a placeholder
+  ("Revisión completada.") since persisting empty content would brick the next
+  Anthropic turn. `ChatController` persists and returns only the stripped answer — the
+  block itself never reaches storage or the client, which is why T17 needed no frontend
+  change. Stripped verdicts go to `noam/SpanishReviewReporter`: each verdict's
+  comma-separated hint words are split and deduped across the whole turn by
+  `Text.normalizeKey`, the *worst* grade winning a repeat (`AGAIN` < `HARD` < `GOOD`);
+  the surviving words are upserted via `NoamGateway.createLexemes` and one review is
+  posted per resulting lexeme id via `recordReview` (`source: EXAM`) — a noam failure is
+  logged and swallowed per word, the same pattern as `SpanishWordController`'s own
+  review posting. With noam unconfigured or unreachable, 語 behaves exactly as it did
+  before T17, system prompt included.
   **文 documents mode (noam-sourced, ephemeral):** a third Español mode that studies
   vocabulary from **noam**, a sibling vocabulary-platform repo (REST API at
   `http://localhost:8080/api/v1` in dev). Flow: the 文 screen (Documentos tab — noam's
@@ -196,8 +223,9 @@ see the fix.
   `SpanishWordController.seed` builds `WordPair`s from client-supplied
   `{lexemeId, spanish, english}` triples) → grades post back to noam on `/check` → a
   topic screen (the same grid `enterTopicSetup` uses) → 語 sentence practice on the
-  missed words only. `WordPair` gained a nullable `lexemeId` (noam's lexeme id, null
-  for a hand-typed list); ids live only in `WordSetStore` — 文 mode writes no JSONL
+  missed words only. `WordPair` carries a nullable `lexemeId` (noam's lexeme id — null
+  only when a hand-typed list's own backfill above also came up empty, e.g. noam
+  unavailable); ids live only in `WordSetStore` — 文 mode writes no JSONL
   and no `.meta.json` sidecar, and nothing is persisted until a 語 chat is actually
   started afterwards. Grading (`SpanishWordController.grade()`): correct with no hint
   → `GOOD`, correct with the full hint revealed → `HARD`, wrong → `AGAIN`; every
@@ -220,6 +248,22 @@ see the fix.
   `resetToSetup`, …); `script.js` itself keeps only the 語/字 flows. coach-web uses
   only noam's pre-existing endpoints and enum values — noam also needs a CORS
   allowance for the coach origin, tracked in the noam repo, not here.
+- **`noam/NoamGateway`** — the only class in `coach-web` that talks to noam (write-backs
+  only; reads are browser-direct). `isAvailable()` — a config check plus a 60s-cached
+  reachability probe of `GET {baseUrl}/documents?language=es` (2s timeout, never throws)
+  — is the single gate for every noam side-effect, the Spanish system prompt's verdict
+  instruction included. `createLexemes(List<LexemeDraft>)` batch-upserts words via
+  `POST /lexemes`, chunked at 25 drafts per request (each item costs one sidecar call in
+  noam), and returns lexeme ids positionally aligned with the input — `null` for any
+  draft it can't confidently place. Contract facts worth keeping: `POST /lexemes` is an
+  idempotent upsert keyed on `(language, type, canonicalKey)`, so callers never persist
+  ids to dedupe; `refLanguage` is always `"en"`; `contextSentence` is omitted (noam
+  accepts and ignores it on creation anyway); and a single rejected entry can 422 the
+  whole batch. That's why alignment falls back to `failed[].surface`: `lexemes[]` holds
+  the successes in request order and every other request item appears in `failed[]` by
+  surface, and a response whose counts don't add up to the chunk size is discarded
+  wholesale (all `null`) rather than partially matched — mis-pairing here would report
+  one word's SRS grade against a different lexeme.
 - **`web/ChatController`** + `ApiExceptionHandler` — the REST route handlers (`/api/chat`
   has JSON + multipart overloads; the three 字/文 word routes — `translate`, `seed`,
   `check` — live on `SpanishWordController`, and the two noam routes —
@@ -261,6 +305,11 @@ see the fix.
   blank config short-circuits to `false` with no HTTP call, and any probe
   failure (including an unchecked `IllegalArgumentException` from a malformed
   or scheme-less `coach.noam.base-url`) is caught and cached as `false`.
+- **Lexeme registration (語/字 → noam) is best-effort and invisible** — with noam
+  unconfigured or unreachable, both modes behave exactly as they did before T14–T17,
+  system prompt included: no verdict instruction is added, `/translate` skips the
+  backfill without making an HTTP call, and a mid-stream noam failure degrades to
+  "no id for this word" rather than surfacing an error to the user.
 
 ## Testing approach (TDD)
 
@@ -268,7 +317,11 @@ see the fix.
 (`@SpringBootTest(RANDOM_PORT)` + `TestRestTemplate`) running the whole owned stack
 for real, with JSONL persistence redirected to a JUnit temp dir. Four boundaries
 are faked via `@MockitoBean` (`SdkAnthropicGateway`, `SdkFileUploadGateway`,
-`DocFetchGateway`, `NoamGateway`), driven with `doAnswer`/`doThrow` inline. Follow
+`DocFetchGateway`, `NoamGateway`), driven with `doAnswer`/`doThrow` inline —
+`NoamGateway`'s default `isAvailable() == false` (Mockito's stock boolean answer,
+unstubbed) is what keeps the pre-existing Spanish tests on their old, noam-free paths;
+a test exercising T14–T17 behavior must `when(noamGateway.isAvailable()).thenReturn(true)`
+explicitly. Follow
 Red → Green → Refactor: write the failing test first, get sign-off, then implement.
 Most coverage lives in this E2E suite; prefer extending it over unit tests with
 heavy mocking. Exceptions are self-contained logic and boundary classes tested in
