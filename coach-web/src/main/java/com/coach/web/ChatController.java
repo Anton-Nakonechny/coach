@@ -7,10 +7,13 @@ import com.coach.coach.CoachMeta;
 import com.coach.coach.CoachService;
 import com.coach.coach.QuestionParser;
 import com.coach.coach.SentenceParser;
+import com.coach.coach.VerdictParser;
 import com.coach.coach.InvalidRequestException;
 import com.coach.model.CoachType;
 import com.coach.model.ModelKey;
 import com.coach.model.ModelsConfig;
+import com.coach.noam.NoamGateway;
+import com.coach.noam.SpanishReviewReporter;
 import com.coach.store.ConversationStore;
 import com.coach.web.dto.ChatRequest;
 import com.coach.web.dto.ChatResponse;
@@ -57,16 +60,21 @@ public class ChatController {
     private final AttachmentService attachments;
     private final CoachService coachService;
     private final TurnReplayGuard replayGuard;
+    private final NoamGateway noamGateway;
+    private final SpanishReviewReporter reviewReporter;
 
     public ChatController(ClaudeClient claudeClient, ConversationStore store, ModelsConfig models,
                           AttachmentService attachments, CoachService coachService,
-                          TurnReplayGuard replayGuard) {
+                          TurnReplayGuard replayGuard, NoamGateway noamGateway,
+                          SpanishReviewReporter reviewReporter) {
         this.claudeClient = claudeClient;
         this.store = store;
         this.models = models;
         this.attachments = attachments;
         this.coachService = coachService;
         this.replayGuard = replayGuard;
+        this.noamGateway = noamGateway;
+        this.reviewReporter = reviewReporter;
     }
 
     /** Text-only chat turn (JSON body) — the original contract, unchanged. */
@@ -150,7 +158,9 @@ public class ChatController {
             store.saveCoachMeta(conversationId, newMeta);
         // Reuse the just-built meta on a coach-start turn; continuing turns read it from disk.
         var meta = newMeta == null ? store.coachMeta(conversationId) : Optional.of(newMeta);
-        String system = meta.map(coachService::systemPrompt).orElse(null);
+        boolean verdicts = meta.map(CoachMeta::coachType).filter(t -> t == CoachType.SPANISH).isPresent()
+                && noamGateway.isAvailable();
+        String system = meta.map(m -> coachService.systemPrompt(m, verdicts)).orElse(null);
 
         store.appendMessage(conversationId, "user", message, model.value(), effort, uploaded);
         String answer;
@@ -160,17 +170,20 @@ public class ChatController {
             store.rollbackLastUserTurn(conversationId);
             throw e;
         }
-        store.appendMessage(conversationId, "assistant", answer, model.value(), effort);
+        VerdictParser.Verdicts parsed = verdicts ? VerdictParser.parse(answer) : null;
+        String finalAnswer = parsed != null ? parsed.strippedAnswer() : answer;
+        store.appendMessage(conversationId, "assistant", finalAnswer, model.value(), effort);
+        if (parsed != null) reviewReporter.report(parsed.items());
 
         var sentences = meta
                 .filter(m -> m.coachType() == CoachType.SPANISH)
-                .map(__ -> parseSentences(answer))
+                .map(__ -> parseSentences(finalAnswer))
                 .orElse(null);
         var question = meta
                 .filter(m -> m.coachType() == CoachType.CLAUDE_ARCHITECT)
-                .map(__ -> QuestionParser.parse(answer))
+                .map(__ -> QuestionParser.parse(finalAnswer))
                 .orElse(null);
-        return new ChatResponse(answer, model, conversationId, sentences, question);
+        return new ChatResponse(finalAnswer, model, conversationId, sentences, question);
     }
 
     @GetMapping("/coaches/spanish/topics")
