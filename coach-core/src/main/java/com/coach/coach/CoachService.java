@@ -173,6 +173,31 @@ public class CoachService {
               sin texto de despedida.
             - Usa exactamente el mismo formato cuando el alumno pida más oraciones.""";
 
+    /**
+     * Appended to the Spanish persona (+ topic clause) when {@link #systemPrompt(CoachMeta, boolean)}
+     * is called with {@code spanishVerdicts} true, so a grading turn's tutor reply carries a
+     * machine-readable verdict block that {@code coach-web} can parse and report to noam. Never
+     * sent when noam is unavailable — the caller's boolean is the whole seam; coach-core itself
+     * knows nothing about noam.
+     */
+    private static final String SPANISH_VERDICT_INSTRUCTION = """
+            Formato OBLIGATORIO adicional cuando corrijas las traducciones del alumno (el cliente
+            lo procesa automáticamente, así que cualquier desviación lo rompe):
+            - Después de tu corrección en prosa de cada oración, termina el mensaje con una línea
+              exactamente igual a:
+            ===EVALUACIÓN===
+            - A continuación, una línea por cada oración corregida, empezando con la(s) misma(s)
+              palabra(s) pista en español entre paréntesis que usaste al proponer esa oración,
+              seguida de un espacio y exactamente una de estas palabras: CORRECTO, PARCIAL o
+              INCORRECTO.
+            - Ejemplo:
+            ===EVALUACIÓN===
+            (caber) CORRECTO
+            (cavar, pala) INCORRECTO
+            - No escribas nada después de ese bloque.
+            - NUNCA incluyas este bloque en una respuesta que sea una lista de oraciones nuevas
+              para traducir — únicamente cuando estés corrigiendo las traducciones del alumno.""";
+
     /** Randomly select a scenario prompt for a new COO coach conversation. */
     public CoachMeta startCoach(CoachType type) {
         Path dir = coachDir(type);
@@ -310,10 +335,23 @@ public class CoachService {
 
     /** System prompt for any turn: Spanish persona (+ topic if set), or COO/Claude persona + scenario file. */
     public String systemPrompt(CoachMeta meta) {
-        if (meta.coachType() == CoachType.SPANISH)
-            return meta.topic() == null
+        return systemPrompt(meta, false);
+    }
+
+    /**
+     * As {@link #systemPrompt(CoachMeta)}, plus — when {@code spanishVerdicts} is true and the
+     * coach is {@link CoachType#SPANISH} — the verdict-block instruction appended after the
+     * topic clause. {@code coach-web} gates {@code spanishVerdicts} on
+     * {@code NoamGateway.isAvailable()}; every other caller (including {@code coach-mcp} and
+     * every non-Spanish coach) uses the one-argument overload and is unaffected.
+     */
+    public String systemPrompt(CoachMeta meta, boolean spanishVerdicts) {
+        if (meta.coachType() == CoachType.SPANISH) {
+            String base = meta.topic() == null
                     ? SPANISH_PERSONA
                     : SPANISH_PERSONA + "\n\nTema de práctica: " + meta.topic();
+            return spanishVerdicts ? base + "\n\n" + SPANISH_VERDICT_INSTRUCTION : base;
+        }
         Path scenario = scenarioPath(meta);
         if (!Files.isRegularFile(scenario))
             throw new IllegalStateException("The coach scenario for this conversation is no longer available.");

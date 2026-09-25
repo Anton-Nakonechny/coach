@@ -2070,6 +2070,193 @@ class ChatApiTest {
         messages.forEach(m -> assertThat(m.get("sentences").isNull()).isTrue());
     }
 
+    // ── T17: 語 verdict block — grading reaches noam, never the browser ────── //
+
+    @Test
+    void spanishSystemPromptAsksForVerdictsWhenNoamAvailable() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) Only this matches.");
+
+        postChat(spanishBody("Ser y estar", "caber"));
+
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).contains("===EVALUACIÓN===");
+    }
+
+    @Test
+    void spanishSystemPromptOmitsVerdictsWhenNoamUnavailable() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        // Default mock: isAvailable() is false.
+        queueText("(caber) Only this matches.");
+
+        postChat(spanishBody("Ser y estar", "caber"));
+
+        GatewayCall call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).doesNotContain("===EVALUACIÓN===");
+    }
+
+    @Test
+    void spanishVerdictBlockIsStrippedFromAnswer() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) Only this matches.");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
+
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-1"));
+        queueText("¡Muy bien! Usaste \"cabe\" correctamente.\n\n===EVALUACIÓN===\n(caber) CORRECTO");
+        JsonNode resp = json(postChat(chatBody("Mi traducción.", "sonnet-4-6", null, cid)));
+
+        assertThat(resp.get("answer").asText()).doesNotContain("===EVALUACIÓN===");
+        assertThat(resp.get("answer").asText()).contains("¡Muy bien!");
+    }
+
+    @Test
+    void spanishVerdictBlockIsNotPersisted() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) Only this matches.");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
+
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-1"));
+        String stray = "¡Muy bien!\n\n===EVALUACIÓN===\n(caber) CORRECTO";
+        queueText(stray);
+        postChat(chatBody("Mi traducción.", "sonnet-4-6", null, cid));
+
+        JsonNode messages = json(rest.getForEntity(url("/api/conversations/" + cid), String.class));
+        String persisted = messages.get(3).get("content").asText();
+        assertThat(persisted).doesNotContain("===EVALUACIÓN===");
+        assertThat(persisted).contains("¡Muy bien!");
+
+        String jsonl = Files.readString(CONV_DIR.resolve(cid + ".jsonl"));
+        assertThat(jsonl).doesNotContain("EVALUACIÓN");
+    }
+
+    @Test
+    void spanishVerdictsReportReviewsPerWord() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) s1\n(cavar) s2\n(pala) s3");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber, cavar, pala")))
+                .get("conversationId").asText();
+
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-caber", "lex-cavar", "lex-pala"));
+        queueText("Corrección.\n\n===EVALUACIÓN===\n(caber) CORRECTO\n(cavar) PARCIAL\n(pala) INCORRECTO");
+        postChat(chatBody("Mis traducciones.", "sonnet-4-6", null, cid));
+
+        verify(noamGateway).createLexemes(List.of(
+                new LexemeDraft("caber", null),
+                new LexemeDraft("cavar", null),
+                new LexemeDraft("pala", null)));
+        verify(noamGateway).recordReview("lex-caber", "GOOD");
+        verify(noamGateway).recordReview("lex-cavar", "HARD");
+        verify(noamGateway).recordReview("lex-pala", "AGAIN");
+    }
+
+    @Test
+    void spanishMultiWordHintReportsEachWord() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(cavar, pala) s1");
+        String cid = json(postChat(spanishBody("Ser y estar", "cavar, pala"))).get("conversationId").asText();
+
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-cavar", "lex-pala"));
+        queueText("Corrección.\n\n===EVALUACIÓN===\n(cavar, pala) INCORRECTO");
+        postChat(chatBody("Mi traducción.", "sonnet-4-6", null, cid));
+
+        verify(noamGateway).createLexemes(List.of(
+                new LexemeDraft("cavar", null),
+                new LexemeDraft("pala", null)));
+        verify(noamGateway).recordReview("lex-cavar", "AGAIN");
+        verify(noamGateway).recordReview("lex-pala", "AGAIN");
+    }
+
+    @Test
+    void spanishRepeatedWordReportsWorstGradeOnce() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) s1\n(caber) s2");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber, caber"))).get("conversationId").asText();
+
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-caber"));
+        queueText("Corrección.\n\n===EVALUACIÓN===\n(caber) CORRECTO\n(caber) INCORRECTO");
+        postChat(chatBody("Mis traducciones.", "sonnet-4-6", null, cid));
+
+        verify(noamGateway).createLexemes(List.of(new LexemeDraft("caber", null)));
+        verify(noamGateway, times(1)).recordReview(any(), any());
+        verify(noamGateway).recordReview("lex-caber", "AGAIN");
+    }
+
+    @Test
+    void spanishUnknownVerdictTokenIsIgnoredButStripped() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) s1\n(pala) s2");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber, pala"))).get("conversationId").asText();
+
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-caber"));
+        queueText("Corrección.\n\n===EVALUACIÓN===\n(caber) CORRECTO\n(pala) MAS_O_MENOS");
+        JsonNode resp = json(postChat(chatBody("Mis traducciones.", "sonnet-4-6", null, cid)));
+
+        assertThat(resp.get("answer").asText()).doesNotContain("===EVALUACIÓN===");
+        verify(noamGateway).createLexemes(List.of(new LexemeDraft("caber", null)));
+        verify(noamGateway).recordReview("lex-caber", "GOOD");
+    }
+
+    @Test
+    void spanishAnswerUntouchedWhenNoamUnavailable() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        // Default mock: isAvailable() is false.
+        queueText("(caber) s1");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
+
+        String stray = "Corrección.\n\n===EVALUACIÓN===\n(caber) CORRECTO";
+        queueText(stray);
+        JsonNode resp = json(postChat(chatBody("Mi traducción.", "sonnet-4-6", null, cid)));
+
+        assertThat(resp.get("answer").asText()).isEqualTo(stray);
+        verify(noamGateway, never()).createLexemes(any());
+        verify(noamGateway, never()).recordReview(any(), any());
+    }
+
+    @Test
+    void spanishSentenceListStillParsesIntoCards() throws IOException {
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) I'm surprised.\n(pala) It's a shame.");
+
+        JsonNode resp = json(postChat(spanishBody("Ser y estar", "caber, pala")));
+
+        assertThat(resp.get("sentences").isArray()).isTrue();
+        assertThat(resp.get("sentences")).hasSize(2);
+        verify(noamGateway, never()).createLexemes(any());
+    }
+
+    @Test
+    void spanishVerdictOnlyReplyPersistsPlaceholderNotEmpty() throws IOException {
+        // A reply that is ONLY the ===EVALUACIÓN=== block (no prose before it) must never
+        // persist as an empty assistant turn — ConversationStore.apiMessages() drops empty
+        // content into a message with zero content blocks, which the Anthropic API rejects
+        // on every later turn, permanently bricking the conversation.
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) Only this matches.");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
+
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-1"));
+        queueText("===EVALUACIÓN===\n(caber) CORRECTO");
+        JsonNode resp = json(postChat(chatBody("Mi traducción.", "sonnet-4-6", null, cid)));
+
+        String answer = resp.get("answer").asText();
+        assertThat(answer).isNotBlank();
+        assertThat(answer).doesNotContain("===EVALUACIÓN===");
+
+        // The conversation must still be usable afterward.
+        queueText("Ok, siguiente oración.");
+        ResponseEntity<String> next = postChat(chatBody("Otra traducción.", "sonnet-4-6", null, cid));
+        assertThat(next.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
     @Test
     void unknownCoachTypeReturns400() {
         ResponseEntity<String> resp = postChat(coachBody("guru-9000"));
