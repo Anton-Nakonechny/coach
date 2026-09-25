@@ -36,7 +36,7 @@ class NoamGatewayTest {
     private NoamGateway gateway;
     private final List<RecordedRequest> requests = new CopyOnWriteArrayList<>();
 
-    private record RecordedRequest(String method, String path, JsonNode body) { }
+    private record RecordedRequest(String method, String path, String query, JsonNode body) { }
 
     @BeforeEach
     void startServer() throws IOException {
@@ -66,9 +66,16 @@ class NoamGatewayTest {
         server.createContext(path, exchange -> {
             byte[] requestBytes = exchange.getRequestBody().readAllBytes();
             JsonNode node = requestBytes.length == 0 ? null : mapper.readTree(requestBytes);
-            requests.add(new RecordedRequest(exchange.getRequestMethod(), exchange.getRequestURI().getPath(), node));
+            requests.add(new RecordedRequest(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
+                    exchange.getRequestURI().getQuery(), node));
             respond(exchange, status, responseBody);
         });
+    }
+
+    private NoamGateway gatewayWith(String baseUrl, String userId) {
+        var config = new AppConfig(null, 0, null, null, null, null, null,
+                new AppConfig.Noam(baseUrl, "profile-1", userId));
+        return new NoamGateway(config, mapper);
     }
 
     @Test
@@ -151,5 +158,64 @@ class NoamGatewayTest {
                 .isInstanceOf(NoamUnavailableException.class);
 
         unconfiguredGateway.close();
+    }
+
+    @Test
+    void isAvailable_blankBaseUrl_returnsFalseWithoutRequest() {
+        recordAndRespond("/documents", 200, "[]");
+        var unconfiguredGateway = gatewayWith("", "user-1");
+
+        assertThat(unconfiguredGateway.isAvailable()).isFalse();
+
+        assertThat(requests).isEmpty();
+        unconfiguredGateway.close();
+    }
+
+    @Test
+    void isAvailable_blankUserId_returnsFalseWithoutRequest() {
+        recordAndRespond("/documents", 200, "[]");
+        var unconfiguredGateway = gatewayWith("http://localhost:" + port, "");
+
+        assertThat(unconfiguredGateway.isAvailable()).isFalse();
+
+        assertThat(requests).isEmpty();
+        unconfiguredGateway.close();
+    }
+
+    @Test
+    void isAvailable_probeReturns200_returnsTrue() {
+        recordAndRespond("/documents", 200, "[]");
+
+        assertThat(gateway.isAvailable()).isTrue();
+
+        assertThat(requests).hasSize(1);
+        var req = requests.get(0);
+        assertThat(req.method()).isEqualTo("GET");
+        assertThat(req.path()).isEqualTo("/documents");
+        assertThat(req.query()).isEqualTo("language=es");
+    }
+
+    @Test
+    void isAvailable_probeReturns500_returnsFalse() {
+        recordAndRespond("/documents", 500, "boom");
+
+        assertThat(gateway.isAvailable()).isFalse();
+    }
+
+    @Test
+    void isAvailable_serverDown_returnsFalse() {
+        server.stop(0);
+
+        assertThat(gateway.isAvailable()).isFalse();
+    }
+
+    @Test
+    void isAvailable_secondCallWithinTtl_doesNotProbeAgain() {
+        recordAndRespond("/documents", 200, "[]");
+
+        gateway.isAvailable();
+        gateway.isAvailable();
+
+        assertThat(requests).hasSize(1);
     }
 }
