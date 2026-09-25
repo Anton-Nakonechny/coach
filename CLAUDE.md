@@ -61,6 +61,11 @@ UUIDs unless your local noam instance requires real ones.
 
 ## Architecture
 
+The **Español** coach (語 / 字 / 文) and the **noam** integration are documented in
+`.claude/rules/espanol-noam.md`, a path-scoped rule that loads on its own whenever you
+touch `coach/`, `word/`, `noam/`, `web/`, the static JS, or `e2e/`. Nothing below
+depends on it — the other coaches never touch noam.
+
 ### Modules
 
 - **`coach-core`** — shared library (plain jar, no `spring-boot-maven-plugin`
@@ -150,8 +155,9 @@ see the fix.
   random scenario `.md` under `<coaches-dir>/<coach folder>` (READMEs/dotfiles
   excluded), persists the pick via the sidecar, and every turn resends
   persona + whole scenario file as the `system` prompt. The first user turn is the
-  synthetic `OPENING_INSTRUCTION`, stored and displayed like any message. SPANISH
-  is enum + UI only (400 until prompts exist). CLAUDE_ARCHITECT uses a topic-grid
+  synthetic `OPENING_INSTRUCTION`, stored and displayed like any message. The SPANISH
+  coach and its noam integration are documented separately — see
+  `.claude/rules/espanol-noam.md`. CLAUDE_ARCHITECT uses a topic-grid
   flow: `GET /api/coaches/claude-architect/topics` returns sorted `.md` stems from
   `coaches/Claude/`; clicking a topic POSTs with `coachType=claude-architect` and
   `topic=<stem>` (blank message), storing `CoachMeta(CLAUDE_ARCHITECT, stem+".md",
@@ -165,61 +171,6 @@ see the fix.
   feedback recap isn't misread as a new question) populates the `question` field of
   `ChatResponse` and `MessageItem` (derived at read time, never persisted). The PDF
   exam guide is gitignored (`coaches/Claude/*.pdf`) and must never be committed.
-  **字 word mode (ephemeral):** `word/WordSetStore` stores translated pairs in a
-  `ConcurrentHashMap` keyed by UUID id, TTL 60 min, max 500 entries. `coach/Text`
-  provides `normalizeKey` (NFD + strip diacritics + lowercase + trim). SPANISH with
-  blank/null topic → `startSpanish(null)` → `CoachMeta(SPANISH, null, null)`,
-  system prompt = `SPANISH_PERSONA` only (no topic clause). `parseWordList` splits
-  on commas/newlines (dash-comment stripped per line before the comma split), trims, then strips leading/trailing non-letter chars from each entry (so wrapping `( )`, quotes, or list numbering don't leak into the stored word or grading).
-  `maskHint` reveals the first `ceil(len/4)` chars of each word, masks the rest with
-  `·` (U+00B7), preserves spaces. `pairTranslations` calls `SentenceParser`
-  on the LLM output and matches echoed español back to the original tokens via
-  `normalizeKey` with positional fallback. `WORD_TRANSLATE_SYSTEM` drives the
-  translate step. Routes: `POST /api/spanish/words/translate` → `SpanishWordController`
-  (returns `{setId, items:[{english,hint,spanish}]}` — the full `spanish` ships so the
-  client can reveal it when the user clicks the hint icon); `POST /api/spanish/words/check`
-  takes `{setId,answers,hintsUsed}` and grades by index (case/accent-insensitive, no LLM),
-  returning `{results:[{english,spanish,correct,fullHint}]}`. Client tri-state: green =
-  correct & no hint, yellow = correct but full hint, red = wrong; the review set carried
-  into the next practice = red ∪ yellow (only clean-correct words drop). Neither endpoint
-  writes JSONL or meta.json. The "practice missed" button (and the 語/字 toggle) POST
-  `/api/chat {coachType:'spanish', message:words}` with no topic, seeding a persisted
-  語 conversation with `OPENING_WITH_WORDS_NO_TOPIC`; "De nuevo 字" restarts a 字 quiz
-  over all words.
-  **文 documents mode (noam-sourced, ephemeral):** a third Español mode that studies
-  vocabulary from **noam**, a sibling vocabulary-platform repo (REST API at
-  `http://localhost:8080/api/v1` in dev). Flow: the 文 screen (Documentos tab — noam's
-  documents, plus upload; Cola tab — the profile's spaced-repetition study queue) →
-  a per-document/per-queue study-item list with study/known/ignored triage → Proceed
-  flushes the triage marks to noam, then seeds a 字 quiz straight from the checked
-  items' own noam translations via `POST /api/spanish/words/seed` (no LLM call —
-  `SpanishWordController.seed` builds `WordPair`s from client-supplied
-  `{lexemeId, spanish, english}` triples) → grades post back to noam on `/check` → a
-  topic screen (the same grid `enterTopicSetup` uses) → 語 sentence practice on the
-  missed words only. `WordPair` gained a nullable `lexemeId` (noam's lexeme id, null
-  for a hand-typed list); ids live only in `WordSetStore` — 文 mode writes no JSONL
-  and no `.meta.json` sidecar, and nothing is persisted until a 語 chat is actually
-  started afterwards. Grading (`SpanishWordController.grade()`): correct with no hint
-  → `GOOD`, correct with the full hint revealed → `HARD`, wrong → `AGAIN`; every
-  graded `/check` call posts one review per lexeme-bearing word to noam via
-  `NoamGateway.recordReview` (`source: EXAM`), including re-quizzes — a noam outage
-  there is swallowed per word (logged, not thrown), since the set is single-use and
-  one failed post must not cost the grades of every word after it. Transport split:
-  reads (documents, study-items, the study queue) go browser→noam directly against
-  `coach.noam.base-url`; writes (lexeme-states, reviews) go browser→coach-web→noam
-  through `noam/NoamGateway` so noam's `userId` never reaches the browser —
-  `GET /api/noam/config` hands the client only `{baseUrl, profileId}`. Config:
-  `AppConfig.Noam` binds `coach.noam.base-url` / `profile-id` / `user-id`; both ids
-  are hardcoded for v1, pending a `GET /profiles/{id}` lookup in noam. Degradation:
-  if noam is unreachable (`GET /api/noam/config` fails, or the initial documents
-  probe does), the 文 glyph is disabled (`probeNoamAvailability` /
-  `disableDocumentsMode` in `noam.js`); a failed marks-flush on Proceed blocks it
-  (shows an error, keeps the list up) since a 502 must never silently drop triage.
-  Frontend split: `static/noam.js` holds all 文-mode JS, loaded after `script.js` in
-  `index.html` and reusing its top-level globals (`API_URL`, `chatMessages`,
-  `resetToSetup`, …); `script.js` itself keeps only the 語/字 flows. coach-web uses
-  only noam's pre-existing endpoints and enum values — noam also needs a CORS
-  allowance for the coach origin, tracked in the noam repo, not here.
 - **`web/ChatController`** + `ApiExceptionHandler` — the REST route handlers (`/api/chat`
   has JSON + multipart overloads; the three 字/文 word routes — `translate`, `seed`,
   `check` — live on `SpanishWordController`, and the two noam routes —
@@ -254,13 +205,8 @@ see the fix.
   server involvement, but every write that could leak noam's `userId`
   (lexeme-states, reviews) routes through `noam/NoamGateway` so the id never reaches
   the browser; `GET /api/noam/config` hands the client only `{baseUrl, profileId}`.
-  The one documented exception is `NoamGateway.isAvailable()`: a server-side,
-  cached (60s TTL) reachability probe (`GET {baseUrl}/documents?language=es`, 2s
-  timeout) that lets server-side code gate its own noam side-effects
-  synchronously before touching noam. It leaks no `userId` and never throws — a
-  blank config short-circuits to `false` with no HTTP call, and any probe
-  failure (including an unchecked `IllegalArgumentException` from a malformed
-  or scheme-less `coach.noam.base-url`) is caught and cached as `false`.
+  `NoamGateway.isAvailable()` is the one documented exception and the single gate for
+  every noam side-effect — see `.claude/rules/espanol-noam.md`.
 
 ## Testing approach (TDD)
 
@@ -286,10 +232,9 @@ suite; scope to one with `-pl coach-web` / `-pl coach-mcp` / `-pl coach-core`.
 second, separate suite for that, run with `npx playwright test`. It boots the
 real `coach-web` app (`webServer` in the config) and drives the browser DOM
 directly — dispatch logic that lives only in the client (mode toggles, setup-screen
-state, the offline outbox) is exercised here, not in the Java suite; 文 mode's own
-specs are `noam-documents-flow.spec.js`, `noam-study-list.spec.js`, and
-`noam-word-source-cache.spec.js`. A change to either JS file is not verified until
-this suite has been run, even if `mvn test` and `node --check` both pass.
+state, the offline outbox) is exercised here, not in the Java suite. A change to
+either JS file is not verified until this suite has been run, even if `mvn test` and
+`node --check` both pass.
 
 ## Pull requests
 
