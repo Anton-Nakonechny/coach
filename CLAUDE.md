@@ -254,6 +254,13 @@ see the fix.
   server involvement, but every write that could leak noam's `userId`
   (lexeme-states, reviews) routes through `noam/NoamGateway` so the id never reaches
   the browser; `GET /api/noam/config` hands the client only `{baseUrl, profileId}`.
+  The one documented exception is `NoamGateway.isAvailable()`: a server-side,
+  cached (60s TTL) reachability probe (`GET {baseUrl}/documents?language=es`, 2s
+  timeout) that lets server-side code gate its own noam side-effects
+  synchronously before touching noam. It leaks no `userId` and never throws — a
+  blank config short-circuits to `false` with no HTTP call, and any probe
+  failure (including an unchecked `IllegalArgumentException` from a malformed
+  or scheme-less `coach.noam.base-url`) is caught and cached as `false`.
 
 ## Testing approach (TDD)
 

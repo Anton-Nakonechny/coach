@@ -17,7 +17,10 @@ import java.util.List;
 /**
  * The only class in {@code coach-web} that talks to noam, the separate vocabulary
  * platform. Write-backs go through here so noam's {@code userId} never reaches the
- * browser — reads happen browser-direct against noam.
+ * browser — reads happen browser-direct against noam, with one exception:
+ * {@link #isAvailable()} runs a narrow server-side reachability probe (no
+ * {@code userId} involved) so server-side callers can gate their own noam
+ * side-effects synchronously before touching noam.
  *
  * <p>Modeled on {@code com.coach.docs.DocFetchGateway}: a {@link HttpClient} field
  * built once, explicit timeouts, and a narrow public surface that doubles as the
@@ -80,6 +83,8 @@ public class NoamGateway implements AutoCloseable {
             return false;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            return false;
+        } catch (RuntimeException e) {
             return false;
         }
     }
