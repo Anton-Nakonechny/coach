@@ -257,11 +257,19 @@ see the fix.
   noam), and returns lexeme ids positionally aligned with the input — `null` for any
   draft it can't confidently place. Contract facts worth keeping: `POST /lexemes` is an
   idempotent upsert keyed on `(language, type, canonicalKey)`, so callers never persist
-  ids to dedupe; `refLanguage` is always `"en"`; `contextSentence` is omitted (noam
-  accepts and ignores it on creation anyway); and a single rejected entry can 422 the
-  whole batch. That's why alignment falls back to `failed[].surface`: `lexemes[]` holds
-  the successes in request order and every other request item appears in `failed[]` by
-  surface, and a response whose counts don't add up to the chunk size is discarded
+  ids to dedupe; `refLanguage` is `"en"` exactly when a draft carries an English gloss and
+  omitted otherwise, because noam rejects an item with a `translation` but no
+  `refLanguage` — `SpanishWordController`'s drafts carry one, `SpanishReviewReporter`'s
+  verdict drafts never do, so noam auto-fills their gloss with a cheap LLM call under its
+  own default ref language; `contextSentence` is omitted, which is not free — noam feeds
+  it to that auto-fill to disambiguate the sense, so verdict words get a context-free
+  gloss. Per-item rejections never fail the request — they come back in `failed[]` with a
+  200/201 — so a whole chunk is nulled only on a non-2xx (`400` for an empty or >100-item
+  batch, neither reachable from here; `502` when nothing was created and a dependency was
+  down), where `createLexemeChunk` never reaches alignment at all. On a 2xx, `lexemes[]`
+  holds the successes in request order and every other request item appears in `failed[]`
+  by surface, so alignment walks the chunk taking ids in order and skipping the surfaces
+  listed as failed; a response whose counts don't add up to the chunk size is discarded
   wholesale (all `null`) rather than partially matched — mis-pairing here would report
   one word's SRS grade against a different lexeme.
 - **`web/ChatController`** + `ApiExceptionHandler` — the REST route handlers (`/api/chat`
