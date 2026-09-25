@@ -1,8 +1,11 @@
 package com.coach.noam;
 
 import com.coach.config.AppConfig;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -12,7 +15,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * The only class in {@code coach-web} that talks to noam, the separate vocabulary
@@ -30,8 +36,13 @@ import java.util.List;
 @Component
 public class NoamGateway implements AutoCloseable {
 
+    private static final Logger log = LoggerFactory.getLogger(NoamGateway.class);
+
     /** noam's {@code lexemeIds} maxItems for the bulk lexeme-states call. */
     private static final int MAX_CHUNK = 500;
+
+    /** Drafts per {@code POST /lexemes} request — each item costs one sidecar call in noam. */
+    private static final int LEXEME_CHUNK = 25;
 
     /** How long a cached {@link #isAvailable()} outcome is trusted before re-probing. */
     private static final Duration PROBE_TTL = Duration.ofSeconds(60);
@@ -57,6 +68,18 @@ public class NoamGateway implements AutoCloseable {
     private record ReviewBody(String lexemeId, String grade, String source) { }
 
     private record Probe(Instant checkedAt, boolean ok) { }
+
+    private record CreateLexemesBody(List<LexemeItem> lexemes) { }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private record LexemeItem(String surface, String language, String translation, String refLanguage,
+            String register, String region) { }
+
+    private record CreateLexemesResponse(List<CreatedLexeme> lexemes, List<FailedLexeme> failed) { }
+
+    private record CreatedLexeme(String lexemeId, boolean created, String displayText) { }
+
+    private record FailedLexeme(String surface, String reason) { }
 
     /** Whether noam is configured and reachable. Never throws; false on any doubt. */
     public boolean isAvailable() {
@@ -104,12 +127,82 @@ public class NoamGateway implements AutoCloseable {
         post("/users/" + config.userId() + "/reviews", new ReviewBody(lexemeId, grade, "EXAM"));
     }
 
+    /**
+     * Upsert {@code drafts} in noam and return their lexeme ids, positionally aligned with the
+     * input. An entry is null when its id could not be determined (a per-chunk noam failure, or
+     * a response noam sent that could not be aligned back to the request). Never throws — a
+     * caller that cannot register a word must still serve the user's quiz or chat.
+     */
+    public List<String> createLexemes(List<LexemeDraft> drafts) {
+        if (drafts.isEmpty()) return List.of();
+
+        var results = new ArrayList<String>(drafts.size());
+        for (int start = 0; start < drafts.size(); start += LEXEME_CHUNK) {
+            var chunk = drafts.subList(start, Math.min(start + LEXEME_CHUNK, drafts.size()));
+            results.addAll(createLexemeChunk(chunk));
+        }
+        return results;
+    }
+
+    private List<String> createLexemeChunk(List<LexemeDraft> chunk) {
+        var items = chunk.stream().map(NoamGateway::toLexemeItem).toList();
+        try {
+            var responseBody = postForBody("/lexemes", new CreateLexemesBody(items));
+            var response = mapper.readValue(responseBody, CreateLexemesResponse.class);
+            return alignLexemeIds(chunk, response);
+        } catch (NoamUnavailableException | JsonProcessingException e) {
+            log.warn("Failed to register {} word(s) with noam: {}", chunk.size(), e.toString());
+            return nullsFor(chunk.size());
+        }
+    }
+
+    private static LexemeItem toLexemeItem(LexemeDraft draft) {
+        var translation = draft.translation() == null || draft.translation().isBlank() ? null : draft.translation();
+        var refLanguage = translation == null ? null : "en";
+        return new LexemeItem(draft.surface(), "es", translation, refLanguage, "NEUTRAL", "ES-Spain");
+    }
+
+    /**
+     * {@code lexemes[]} holds the successes in request order; every other request item appears
+     * in {@code failed[]}, keyed by its original surface. Mis-pairing here would report one
+     * word's SRS grade to a different lexeme, so a response that cannot be trusted to line up
+     * (the sanity guard) is discarded wholesale rather than partially matched.
+     */
+    private static List<String> alignLexemeIds(List<LexemeDraft> chunk, CreateLexemesResponse response) {
+        var lexemes = response.lexemes() == null ? List.<CreatedLexeme>of() : response.lexemes();
+        var failed = response.failed() == null ? List.<FailedLexeme>of() : response.failed();
+        if (lexemes.size() + failed.size() != chunk.size()) return nullsFor(chunk.size());
+
+        var failedSurfaces = failed.stream().map(FailedLexeme::surface)
+                .collect(Collectors.toCollection(ArrayList::new));
+        var results = new ArrayList<String>(chunk.size());
+        var lexemeIterator = lexemes.iterator();
+        for (var draft : chunk) {
+            if (failedSurfaces.remove(draft.surface())) {
+                results.add(null);
+            } else if (lexemeIterator.hasNext()) {
+                results.add(lexemeIterator.next().lexemeId());
+            } else {
+                return nullsFor(chunk.size());
+            }
+        }
+        return results;
+    }
+
+    private static List<String> nullsFor(int size) {
+        return new ArrayList<>(Collections.nCopies(size, null));
+    }
+
     private void put(String path, Object body) {
         send(request(path).PUT(HttpRequest.BodyPublishers.ofString(writeJson(body))));
     }
 
     private void post(String path, Object body) {
         send(request(path).POST(HttpRequest.BodyPublishers.ofString(writeJson(body))));
+    }
+
+    private String postForBody(String path, Object body) {
+        return sendForBody(request(path).POST(HttpRequest.BodyPublishers.ofString(writeJson(body))));
     }
 
     private HttpRequest.Builder request(String path) {
@@ -137,9 +230,13 @@ public class NoamGateway implements AutoCloseable {
     }
 
     private void send(HttpRequest.Builder requestBuilder) {
+        sendForBody(requestBuilder);
+    }
+
+    private String sendForBody(HttpRequest.Builder requestBuilder) {
         try {
             var response = client.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() / 100 == 2) return;
+            if (response.statusCode() / 100 == 2) return response.body();
             throw new NoamUnavailableException("noam returned HTTP " + response.statusCode());
         } catch (IOException e) {
             throw new NoamUnavailableException("noam request failed", e);
