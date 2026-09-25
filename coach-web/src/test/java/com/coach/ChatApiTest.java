@@ -14,6 +14,7 @@ import com.coach.anthropic.TextBlock;
 import com.coach.anthropic.UploadedFile;
 import com.coach.config.AppConfig;
 import com.coach.docs.DocFetchGateway;
+import com.coach.noam.LexemeDraft;
 import com.coach.noam.NoamGateway;
 import com.coach.noam.NoamUnavailableException;
 import com.coach.store.ConversationStore;
@@ -50,6 +51,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -71,9 +73,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * Black-box end-to-end tests of the Coach HTTP contract — Java port of
@@ -2947,6 +2951,8 @@ class ChatApiTest {
 
     @Test
     void checkPostsNoReviewsForTypedWordList() {
+        // Default mock: isAvailable() is false, so translate's backfill is a no-op and
+        // every pair keeps a null lexemeId — check() has nothing to report.
         queueText("(caber) to fit\n(pala) shovel");
         var t = json(postTranslate(Map.of("words", "caber, pala")));
 
@@ -2961,7 +2967,100 @@ class ChatApiTest {
         var resp = postCheck(checkBody);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        verifyNoInteractions(noamGateway);
+        verify(noamGateway, never()).recordReview(any(), any());
+    }
+
+    @Test
+    void wordTranslateRegistersLexemesWhenNoamAvailable() {
+        when(noamGateway.isAvailable()).thenReturn(true);
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-1", "lex-2"));
+        queueText("(caber) to fit\n(pala) shovel");
+
+        var resp = postTranslate(Map.of("words", "caber, pala"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        verify(noamGateway).createLexemes(List.of(
+                new LexemeDraft("caber", "to fit"),
+                new LexemeDraft("pala", "shovel")));
+    }
+
+    @Test
+    void wordCheckReportsReviewsForHandTypedSet() {
+        when(noamGateway.isAvailable()).thenReturn(true);
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-good", "lex-hard", "lex-again"));
+        queueText("(caber) to fit\n(pala) shovel\n(cráneo) skull");
+
+        var t = json(postTranslate(Map.of("words", "caber, pala, cráneo")));
+
+        Map<String, String> answerByEnglish = Map.of(
+                "to fit", "caber",   // clean correct
+                "shovel", "pala",   // correct, but full hint revealed
+                "skull", "wrong");  // wrong
+        List<String> answers = new ArrayList<>();
+        List<Boolean> hintsUsed = new ArrayList<>();
+        for (JsonNode item : t.get("items")) {
+            String english = item.get("english").asText();
+            answers.add(answerByEnglish.get(english));
+            hintsUsed.add("shovel".equals(english));
+        }
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", t.get("setId").asText());
+        checkBody.put("answers", answers);
+        checkBody.put("hintsUsed", hintsUsed);
+        var resp = postCheck(checkBody);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        verify(noamGateway).recordReview("lex-good", "GOOD");
+        verify(noamGateway).recordReview("lex-hard", "HARD");
+        verify(noamGateway).recordReview("lex-again", "AGAIN");
+    }
+
+    @Test
+    void wordTranslateSkipsNoamWhenUnavailable() {
+        // Default mock: isAvailable() is false.
+        queueText("(caber) to fit\n(pala) shovel");
+
+        var resp = postTranslate(Map.of("words", "caber, pala"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode node = json(resp);
+        assertThat(node.get("items")).hasSize(2);
+        verify(noamGateway, never()).createLexemes(any());
+        verify(noamGateway, never()).recordReview(any(), any());
+    }
+
+    @Test
+    void wordCheckSkipsWordWhoseLexemeIdIsNull() {
+        when(noamGateway.isAvailable()).thenReturn(true);
+        when(noamGateway.createLexemes(any())).thenReturn(Arrays.asList("lex-1", null));
+        queueText("(caber) to fit\n(pala) shovel");
+
+        var t = json(postTranslate(Map.of("words", "caber, pala")));
+
+        Map<String, String> answerByEnglish = Map.of("to fit", "caber", "shovel", "pala");
+        List<String> answers = new ArrayList<>();
+        for (JsonNode item : t.get("items"))
+            answers.add(answerByEnglish.get(item.get("english").asText()));
+
+        Map<String, Object> checkBody = new HashMap<>();
+        checkBody.put("setId", t.get("setId").asText());
+        checkBody.put("answers", answers);
+        var resp = postCheck(checkBody);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        verify(noamGateway, times(1)).recordReview(any(), any());
+    }
+
+    @Test
+    void wordSeedStillUsesClientSuppliedIds() {
+        List<Map<String, Object>> items = List.of(
+                Map.of("lexemeId", "lex-1", "spanish", "caber", "english", "to fit"));
+
+        var resp = postSeed(Map.of("items", items));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        verify(noamGateway, never()).createLexemes(any());
     }
 
     @Test

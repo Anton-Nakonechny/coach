@@ -8,6 +8,7 @@ import com.coach.coach.Text;
 import com.coach.coach.InvalidRequestException;
 import com.coach.model.ModelKey;
 import com.coach.model.ModelsConfig;
+import com.coach.noam.LexemeDraft;
 import com.coach.noam.NoamGateway;
 import com.coach.noam.NoamUnavailableException;
 import com.coach.web.dto.SeedItem;
@@ -72,11 +73,33 @@ public class SpanishWordController {
         String answer = claudeClient.generate(model, List.of(msg), request.effort(),
                 CoachService.WORD_TRANSLATE_SYSTEM);
 
-        List<WordPair> pairs = coachService.pairTranslations(tokens, answer);
+        List<WordPair> pairs = withLexemeIds(coachService.pairTranslations(tokens, answer));
         List<WordPair> shuffled = new ArrayList<>(pairs);
         Collections.shuffle(shuffled);
 
         return respond(shuffled);
+    }
+
+    /**
+     * Register a hand-typed set's words in noam so grading can report reviews, same as a
+     * 文-seeded set. A no-op (not even an HTTP call) when noam is unavailable — requirement
+     * #1 of T16: both 語 and 字 modes must keep working unchanged with no noam connection.
+     * Runs before the shuffle so {@code pairs} and the draft list stay positionally aligned.
+     */
+    private List<WordPair> withLexemeIds(List<WordPair> pairs) {
+        if (!noamGateway.isAvailable()) return pairs;
+
+        List<LexemeDraft> drafts = pairs.stream()
+                .map(p -> new LexemeDraft(p.spanishOriginal(), p.english()))
+                .toList();
+        List<String> ids = noamGateway.createLexemes(drafts);
+
+        List<WordPair> withIds = new ArrayList<>(pairs.size());
+        for (int i = 0; i < pairs.size(); i++) {
+            WordPair pair = pairs.get(i);
+            withIds.add(new WordPair(pair.english(), pair.spanishOriginal(), ids.get(i)));
+        }
+        return withIds;
     }
 
     /**
