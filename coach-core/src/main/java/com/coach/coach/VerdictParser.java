@@ -18,6 +18,13 @@ public class VerdictParser {
     private static final String MARKER = "===EVALUACIÓN===";
     private static final Pattern LINE = Pattern.compile("^\\((.+?)\\)\\s+(.+)$");
 
+    /**
+     * Stands in for the prose when a reply is ONLY the verdict block. Persisting/returning
+     * an empty string instead would later resend a history message with zero content blocks,
+     * which the Anthropic Messages API rejects on every subsequent turn — bricking the chat.
+     */
+    private static final String NO_PROSE_PLACEHOLDER = "Revisión completada.";
+
     public record VerdictItem(String hint, String grade) { }
 
     public record Verdicts(String strippedAnswer, List<VerdictItem> items) { }
@@ -32,6 +39,7 @@ public class VerdictParser {
         if (markerIdx == -1) return new Verdicts(answer, List.of());
 
         String stripped = String.join("\n", Arrays.copyOfRange(lines, 0, markerIdx)).stripTrailing();
+        if (stripped.isEmpty()) stripped = NO_PROSE_PLACEHOLDER;
         List<VerdictItem> items = new ArrayList<>();
         for (int i = markerIdx + 1; i < lines.length; i++) {
             String line = lines[i].trim();

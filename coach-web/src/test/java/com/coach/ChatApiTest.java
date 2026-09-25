@@ -2233,6 +2233,31 @@ class ChatApiTest {
     }
 
     @Test
+    void spanishVerdictOnlyReplyPersistsPlaceholderNotEmpty() throws IOException {
+        // A reply that is ONLY the ===EVALUACIÓN=== block (no prose before it) must never
+        // persist as an empty assistant turn — ConversationStore.apiMessages() drops empty
+        // content into a message with zero content blocks, which the Anthropic API rejects
+        // on every later turn, permanently bricking the conversation.
+        writeSpanishTopics("Ser y estar");
+        when(noamGateway.isAvailable()).thenReturn(true);
+        queueText("(caber) Only this matches.");
+        String cid = json(postChat(spanishBody("Ser y estar", "caber"))).get("conversationId").asText();
+
+        when(noamGateway.createLexemes(any())).thenReturn(List.of("lex-1"));
+        queueText("===EVALUACIÓN===\n(caber) CORRECTO");
+        JsonNode resp = json(postChat(chatBody("Mi traducción.", "sonnet-4-6", null, cid)));
+
+        String answer = resp.get("answer").asText();
+        assertThat(answer).isNotBlank();
+        assertThat(answer).doesNotContain("===EVALUACIÓN===");
+
+        // The conversation must still be usable afterward.
+        queueText("Ok, siguiente oración.");
+        ResponseEntity<String> next = postChat(chatBody("Otra traducción.", "sonnet-4-6", null, cid));
+        assertThat(next.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
     void unknownCoachTypeReturns400() {
         ResponseEntity<String> resp = postChat(coachBody("guru-9000"));
 
