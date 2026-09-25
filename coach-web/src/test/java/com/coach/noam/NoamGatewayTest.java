@@ -218,4 +218,129 @@ class NoamGatewayTest {
 
         assertThat(requests).hasSize(1);
     }
+
+    @Test
+    void createLexemes_emptyList_makesNoRequest() {
+        assertThat(gateway.createLexemes(List.of())).isEmpty();
+
+        assertThat(requests).isEmpty();
+    }
+
+    @Test
+    void createLexemes_allSucceed_returnsIdsInRequestOrder() {
+        recordAndRespond("/lexemes", 201, """
+                {"lexemes": [
+                    {"lexemeId": "id-a", "created": true, "displayText": "a"},
+                    {"lexemeId": "id-b", "created": true, "displayText": "b"},
+                    {"lexemeId": "id-c", "created": false, "displayText": "c"}
+                ], "failed": []}
+                """);
+
+        var ids = gateway.createLexemes(List.of(
+                new LexemeDraft("a", null), new LexemeDraft("b", null), new LexemeDraft("c", null)));
+
+        assertThat(ids).containsExactly("id-a", "id-b", "id-c");
+        assertThat(requests).hasSize(1);
+        assertThat(requests.get(0).method()).isEqualTo("POST");
+        assertThat(requests.get(0).path()).isEqualTo("/lexemes");
+    }
+
+    @Test
+    void createLexemes_oneFailedEntry_returnsNullInThatSlot() {
+        recordAndRespond("/lexemes", 200, """
+                {"lexemes": [
+                    {"lexemeId": "id-a", "created": true, "displayText": "a"},
+                    {"lexemeId": "id-c", "created": true, "displayText": "c"}
+                ], "failed": [{"surface": "b", "reason": "not a word"}]}
+                """);
+
+        var ids = gateway.createLexemes(List.of(
+                new LexemeDraft("a", null), new LexemeDraft("b", null), new LexemeDraft("c", null)));
+
+        assertThat(ids).containsExactly("id-a", null, "id-c");
+    }
+
+    @Test
+    void createLexemes_countsDoNotAddUp_returnsAllNulls() {
+        recordAndRespond("/lexemes", 201, """
+                {"lexemes": [
+                    {"lexemeId": "id-a", "created": true, "displayText": "a"},
+                    {"lexemeId": "id-b", "created": true, "displayText": "b"}
+                ], "failed": []}
+                """);
+
+        var ids = gateway.createLexemes(List.of(
+                new LexemeDraft("a", null), new LexemeDraft("b", null), new LexemeDraft("c", null)));
+
+        assertThat(ids).containsExactly(null, null, null);
+    }
+
+    @Test
+    void createLexemes_nonSuccessStatus_returnsNullsWithoutThrowing() {
+        recordAndRespond("/lexemes", 422, "{\"message\":\"not a word\"}");
+
+        var ids = gateway.createLexemes(List.of(new LexemeDraft("a", null), new LexemeDraft("b", null)));
+
+        assertThat(ids).containsExactly(null, null);
+    }
+
+    @Test
+    void createLexemes_blankTranslation_omitsTranslationFields() {
+        recordAndRespond("/lexemes", 201, """
+                {"lexemes": [{"lexemeId": "id-a", "created": true, "displayText": "a"}], "failed": []}
+                """);
+
+        gateway.createLexemes(List.of(new LexemeDraft("a", "  ")));
+
+        var item = requests.get(0).body().get("lexemes").get(0);
+        assertThat(item.has("translation")).isFalse();
+        assertThat(item.has("refLanguage")).isFalse();
+        assertThat(item.get("surface").asText()).isEqualTo("a");
+        assertThat(item.get("language").asText()).isEqualTo("es");
+        assertThat(item.get("register").asText()).isEqualTo("NEUTRAL");
+        assertThat(item.get("region").asText()).isEqualTo("ES-Spain");
+    }
+
+    @Test
+    void createLexemes_sendsRefLanguageEn() {
+        recordAndRespond("/lexemes", 201, """
+                {"lexemes": [{"lexemeId": "id-a", "created": true, "displayText": "a"}], "failed": []}
+                """);
+
+        gateway.createLexemes(List.of(new LexemeDraft("avestruz", "ostrich")));
+
+        var item = requests.get(0).body().get("lexemes").get(0);
+        assertThat(item.get("translation").asText()).isEqualTo("ostrich");
+        assertThat(item.get("refLanguage").asText()).isEqualTo("en");
+    }
+
+    @Test
+    void createLexemes_moreThanChunkSize_splitsIntoSeveralRequests() {
+        server.createContext("/lexemes", exchange -> {
+            byte[] requestBytes = exchange.getRequestBody().readAllBytes();
+            JsonNode node = mapper.readTree(requestBytes);
+            requests.add(new RecordedRequest(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
+                    exchange.getRequestURI().getQuery(), node));
+
+            var responseLexemes = new ArrayList<String>();
+            node.get("lexemes").forEach(item -> {
+                var surface = item.get("surface").asText();
+                responseLexemes.add(String.format(
+                        "{\"lexemeId\": \"id-%s\", \"created\": true, \"displayText\": \"%s\"}", surface, surface));
+            });
+            var responseBody = "{\"lexemes\": [" + String.join(",", responseLexemes) + "], \"failed\": []}";
+            respond(exchange, 201, responseBody);
+        });
+        var drafts = IntStream.range(0, 30)
+                .mapToObj(i -> new LexemeDraft("word" + i, null))
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        var ids = gateway.createLexemes(drafts);
+
+        assertThat(requests).hasSize(2);
+        assertThat(requests.get(0).body().get("lexemes")).hasSize(25);
+        assertThat(requests.get(1).body().get("lexemes")).hasSize(5);
+        assertThat(ids).containsExactlyElementsOf(
+                IntStream.range(0, 30).mapToObj(i -> "id-word" + i).toList());
+    }
 }
