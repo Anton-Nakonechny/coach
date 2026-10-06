@@ -1659,6 +1659,56 @@ function createLoadingMessage() {
 
 const COPY_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
 const CHECK_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+const CROSS_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+
+// `navigator.clipboard` exists only in a secure context, and a phone can never reach
+// this dev server on `localhost` — localhost on a phone is the phone. It arrives by
+// mDNS name (http://anakon.local:9999) or LAN IP (http://192.168.0.13:9999), and
+// neither is one of the privileged origins browsers exempt from the rule, so the whole
+// Clipboard API is absent there. `document.execCommand('copy')` is not gated that way,
+// so it backs both failure modes: the API missing outright, and `writeText` rejecting
+// (a denied permission, or an iOS in-app WKWebView opened from Telegram/Slack/Gmail).
+// Runs synchronously so the copy stays inside the user gesture that iOS requires.
+function legacyCopy(text) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    // iOS refuses to select a readonly textarea, and ignores `.select()` on one it will
+    // — it wants a Range over contentEditable plus setSelectionRange. Kept on-screen but
+    // invisible: display:none / visibility:hidden would make it unselectable, and 16px
+    // avoids the iOS zoom-on-focus.
+    area.contentEditable = 'true';
+    area.readOnly = false;
+    area.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;'
+                       + 'padding:0;border:none;opacity:0;font-size:16px;';
+    document.body.appendChild(area);
+
+    const active = document.activeElement;
+    const selection = window.getSelection();
+    const previous = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+
+    // iOS wants a Range over a contentEditable node, but every browser copies the
+    // *focused* field's own selection — so focus + setSelectionRange must come last.
+    // Without the focus, execCommand still reports success and copies nothing.
+    const range = document.createRange();
+    range.selectNodeContents(area);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    area.focus();
+    area.setSelectionRange(0, text.length);
+
+    let copied = false;
+    try {
+        copied = document.execCommand('copy');
+    } finally {
+        // Leave the user's own selection and focus as they were; copying should not
+        // clear a selection, and stolen focus pops the on-screen keyboard on a phone.
+        selection.removeAllRanges();
+        if (previous) selection.addRange(previous);
+        area.remove();
+        active?.focus?.();
+    }
+    return copied;
+}
 
 function buildCopyButton(content) {
     const btn = document.createElement('button');
@@ -1666,12 +1716,25 @@ function buildCopyButton(content) {
     btn.className = 'icon-button copy-button';
     btn.setAttribute('aria-label', 'Copy message');
     btn.innerHTML = COPY_SVG;
+
+    const flash = (svg, label) => {
+        btn.innerHTML = svg;
+        btn.setAttribute('aria-label', label);
+        setTimeout(() => {
+            btn.innerHTML = COPY_SVG;
+            btn.setAttribute('aria-label', 'Copy message');
+        }, 1200);
+    };
+    const copied = () => flash(CHECK_SVG, 'Copied');
+    // Never silent: a swallowed failure is what made this read as flaky rather than broken.
+    const fallback = () => legacyCopy(content) ? copied() : flash(CROSS_SVG, 'Copy failed');
+
     btn.addEventListener('click', () => {
-        if (!navigator.clipboard) return;
-        navigator.clipboard.writeText(content).then(() => {
-            btn.innerHTML = CHECK_SVG;
-            setTimeout(() => btn.innerHTML = COPY_SVG, 1200);
-        }).catch(() => {});
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(content).then(copied).catch(fallback);
+            return;
+        }
+        fallback();
     });
     return btn;
 }
