@@ -120,12 +120,13 @@ let noamModalBackdrop = null; // currently-open upload modal, or null
 let noamUploadInFlight = false; // holds the upload modal open while its POST is pending
 
 // Tab-switch dispatcher: called both on first entering the noam shell and on every
-// Documentos/Cola click. Closes any open upload modal so switching tabs never leaves
-// one stranded, flushes any pending study-list marks so switching tabs can't silently
+// Documentos/Cola click. Closes any open modal so switching tabs never leaves one
+// stranded, flushes any pending study-list marks so switching tabs can't silently
 // drop triage the same way Back already guards against, then rebuilds the panel for
 // the newly active tab.
 function activateNoamTab(tabId, panel) {
     closeUploadModal();
+    closeConfirmModal();
     flushStudyMarksInBackground();
     if (tabId === 'documentos') {
         renderDocumentosTab(panel);
@@ -244,8 +245,17 @@ function renderDocGrid() {
     noamDocContent.appendChild(grid);
 }
 
+// Returns the grid ITEM — a wrapper around the card button, not the button itself.
+// The dustbin has to be a sibling of that button rather than a child: nesting one
+// button inside another is invalid HTML (browsers unnest it), and the card button is
+// `disabled` for every non-EXTRACTED document, which would swallow clicks aimed at a
+// nested child. A still-processing or FAILED document is exactly the one worth
+// dropping, so its dustbin must stay live while its card stays dead.
 function buildDocRow(doc) {
     const isExtracted = doc.status === 'EXTRACTED';
+    const card = document.createElement('div');
+    card.className = 'noam-doc-card';
+
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'topic-button noam-doc-row';
@@ -270,7 +280,67 @@ function buildDocRow(doc) {
     btn.appendChild(date);
 
     if (isExtracted) btn.addEventListener('click', () => openStudyItems(doc.id, doc.title));
+
+    const del = noamTrashButton('noam-doc-delete', 'Eliminar documento');
+    del.addEventListener('click', () => confirmDeleteDocument(doc, () => {
+        // Drop the card at once, then let the regular (silent) refresh reconcile
+        // against noam's own list — the same optimistic idiom as a fresh upload.
+        noamDocuments = (noamDocuments || []).filter(d => d.id !== doc.id);
+        renderDocGrid();
+        fetchAndRenderDocuments({ silent: true });
+    }));
+
+    card.appendChild(btn);
+    card.appendChild(del);
+    return card;
+}
+
+// The dustbin pictogram, same 24-grid outline script.js uses for a conversation row,
+// so both delete affordances in the app read as the same control.
+function noamTrashButton(className, label) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `icon-button ${className}`;
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+            <path d="M10 11v6"></path><path d="M14 11v6"></path>
+            <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+        </svg>`;
     return btn;
+}
+
+// Both entry points (grid card, study-list header) funnel through here so the wording,
+// the busy state and the failure handling are identical wherever the dustbin is clicked.
+// `afterDelete` only ever runs once noam has actually answered 204.
+function confirmDeleteDocument(doc, afterDelete) {
+    openConfirmModal({
+        title: 'Eliminar documento',
+        message: `¿Eliminar «${doc.title || '(sin título)'}»? Las palabras que ya has aprendido se conservan.`,
+        confirmLabel: 'Eliminar',
+        busyLabel: 'Eliminando…',
+        onConfirm: async () => {
+            await deleteNoamDocument(doc.id);
+            afterDelete();
+        },
+    });
+}
+
+// Browser-direct, like the upload POST beside it: the delete carries no userId, so it
+// has nothing for the coach-web detour to keep out of the browser. noam answers 204 on
+// success, 404 if it is already gone, and 409 while its ingestion job is still running —
+// that last one is a routine outcome, which is why the caller keeps the modal up.
+async function deleteNoamDocument(documentId) {
+    await noamProbe;
+    if (!noamConfig || !noamConfig.baseUrl) throw new Error('noam no está disponible.');
+    const resp = await fetch(`${noamConfig.baseUrl}/documents/${documentId}`, { method: 'DELETE' });
+    if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || err.message || `Error al eliminar (HTTP ${resp.status})`);
+    }
 }
 
 // A missing or unparseable createdAt would make the sort comparator return NaN, which
@@ -299,12 +369,17 @@ let noamStudyState = null;   // {loadPage, offset, exhausted, loading, paging} f
 let noamMarksFlush = Promise.resolve(); // the most recent background marks flush; always settles, never rejects
 
 function openStudyItems(documentId, title) {
+    const backToGrid = () => {
+        flushStudyMarksInBackground();
+        renderDocumentosTab(document.getElementById('noamPanel'));
+    };
     renderNoamItemList(document.getElementById('noamPanel'), {
         title,
-        onBack: () => {
-            flushStudyMarksInBackground();
-            renderDocumentosTab(document.getElementById('noamPanel'));
-        },
+        onBack: backToGrid,
+        // Deleting the document the open list came from leaves nothing to show, so the
+        // same teardown Back uses doubles as the success path: the marks made before
+        // the delete are about lexemes, which outlive the document, so they still flush.
+        onDelete: () => confirmDeleteDocument({ id: documentId, title }, backToGrid),
         paging: true,
         loadPage: (offset) => fetchDocumentStudyItems(documentId, offset),
     });
@@ -324,7 +399,7 @@ async function fetchDocumentStudyItems(documentId, offset) {
     return items.map(it => ({ lexemeId: it.lexeme.id, spanish: it.lexeme.displayText, english: it.translation }));
 }
 
-function renderNoamItemList(panel, { title, onBack, loadPage, paging, emptyMessage }) {
+function renderNoamItemList(panel, { title, onBack, onDelete, loadPage, paging, emptyMessage }) {
     panel.innerHTML = '';
     noamStudyEntries = new Map();
     noamStudyState = {
@@ -345,6 +420,14 @@ function renderNoamItemList(panel, { title, onBack, loadPage, paging, emptyMessa
     heading.textContent = title || '';
     header.appendChild(backBtn);
     header.appendChild(heading);
+    // Sits immediately after the title rather than floating at the far right of a wide
+    // panel, so it reads as acting on the name beside it. Omitted entirely for the Cola
+    // tab, whose list is the profile's queue and has no document to delete.
+    if (onDelete) {
+        const del = noamTrashButton('noam-study-delete', 'Eliminar documento');
+        del.addEventListener('click', onDelete);
+        header.appendChild(del);
+    }
 
     const toolbar = document.createElement('div');
     toolbar.className = 'noam-study-toolbar';
@@ -1070,6 +1153,118 @@ function addOptimisticDocument(job, title) {
     };
     noamDocuments = [optimistic, ...(noamDocuments || []).filter(d => d.id !== optimistic.id)];
     renderDocGrid();
+}
+
+// ── Confirmation modal (destructive actions) ──────────────────
+// Its own backdrop global rather than a second user of noamModalBackdrop: the upload
+// modal's close is gated on noamUploadInFlight, and sharing one slot would let either
+// modal's teardown remove the other's node and strand the reference.
+//
+// `onConfirm` resolving closes the modal; it throwing leaves the modal up with the
+// reason printed inside it. That asymmetry is the point — noam answers 409 to a delete
+// while the document's ingestion job is still running, so a refusal is routine, and a
+// modal that closed on failure would read as a delete that worked.
+
+let noamConfirmBackdrop = null;
+let noamConfirmInFlight = false;
+
+function openConfirmModal({ title, message, confirmLabel, busyLabel, onConfirm }) {
+    if (noamConfirmInFlight) return;
+    closeConfirmModal();
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'noam-modal-backdrop';
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeConfirmModal(); });
+
+    const modal = document.createElement('div');
+    modal.className = 'noam-modal noam-confirm-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'noamConfirmTitle');
+
+    const header = document.createElement('div');
+    header.className = 'noam-modal-header';
+    const heading = document.createElement('h3');
+    heading.id = 'noamConfirmTitle';
+    heading.textContent = title;
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'icon-button noam-modal-close';
+    closeBtn.setAttribute('aria-label', 'Cerrar');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', closeConfirmModal);
+    header.appendChild(heading);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement('p');
+    body.className = 'noam-confirm-message';
+    body.textContent = message;
+
+    const errorEl = document.createElement('p');
+    errorEl.className = 'noam-modal-error';
+    errorEl.hidden = true;
+
+    const actions = document.createElement('div');
+    actions.className = 'noam-modal-actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'topic-button';
+    cancelBtn.textContent = 'Cancelar';
+    cancelBtn.addEventListener('click', closeConfirmModal);
+    const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.className = 'topic-button noam-confirm-danger';
+    confirmBtn.textContent = confirmLabel;
+    confirmBtn.addEventListener('click', async () => {
+        errorEl.hidden = true;
+        noamConfirmInFlight = true;
+        setConfirmModalBusy(true);
+        confirmBtn.textContent = busyLabel || confirmLabel;
+        try {
+            await onConfirm();
+            // Cleared before the close, which is gated on it.
+            noamConfirmInFlight = false;
+            closeConfirmModal();
+        } catch (err) {
+            noamConfirmInFlight = false;
+            setConfirmModalBusy(false);
+            confirmBtn.textContent = confirmLabel;
+            errorEl.textContent = humanizeNoamError(err);
+            errorEl.hidden = false;
+        }
+    });
+    actions.appendChild(cancelBtn);
+    actions.appendChild(confirmBtn);
+
+    modal.appendChild(header);
+    modal.appendChild(body);
+    modal.appendChild(errorEl);
+    modal.appendChild(actions);
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+    noamConfirmBackdrop = backdrop;
+
+    document.addEventListener('keydown', noamConfirmEscHandler);
+    // Focus lands on Cancelar, not the destructive button: a stray Enter right after
+    // opening should do nothing rather than delete the document.
+    cancelBtn.focus();
+}
+
+function setConfirmModalBusy(busy) {
+    if (!noamConfirmBackdrop) return;
+    noamConfirmBackdrop.querySelectorAll('button').forEach(b => { b.disabled = busy; });
+}
+
+function noamConfirmEscHandler(e) {
+    if (e.key === 'Escape') closeConfirmModal();
+}
+
+function closeConfirmModal() {
+    if (noamConfirmInFlight) return;
+    if (!noamConfirmBackdrop) return;
+    noamConfirmBackdrop.remove();
+    noamConfirmBackdrop = null;
+    document.removeEventListener('keydown', noamConfirmEscHandler);
 }
 
 // ── "Subir documento" modal ───────────────────────────────────

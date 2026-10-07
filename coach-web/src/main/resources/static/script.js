@@ -1673,7 +1673,7 @@ function legacyCopy(text) {
     const area = document.createElement('textarea');
     area.value = text;
     // iOS refuses to select a readonly textarea, and ignores `.select()` on one it will
-    // — it wants a Range over contentEditable plus setSelectionRange. Kept on-screen but
+    // — it wants contentEditable plus setSelectionRange. Kept on-screen but
     // invisible: display:none / visibility:hidden would make it unselectable, and 16px
     // avoids the iOS zoom-on-focus.
     area.contentEditable = 'true';
@@ -1686,13 +1686,12 @@ function legacyCopy(text) {
     const selection = window.getSelection();
     const previous = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
 
-    // iOS wants a Range over a contentEditable node, but every browser copies the
-    // *focused* field's own selection — so focus + setSelectionRange must come last.
+    // Every browser copies the *focused* field's own selection, and a textarea's text
+    // is its `value`, not a child text node — a Range over it would select nothing, so
+    // focus + setSelectionRange is what carries the copy. The document selection is
+    // only cleared, so a leftover page selection can't compete with the field's.
     // Without the focus, execCommand still reports success and copies nothing.
-    const range = document.createRange();
-    range.selectNodeContents(area);
     selection.removeAllRanges();
-    selection.addRange(range);
     area.focus();
     area.setSelectionRange(0, text.length);
 
@@ -1717,10 +1716,14 @@ function buildCopyButton(content) {
     btn.setAttribute('aria-label', 'Copy message');
     btn.innerHTML = COPY_SVG;
 
+    // Re-armed, never stacked: without clearing the pending one, a second click inside
+    // the window has its own confirmation wiped by the first click's stale reset.
+    let reset = null;
     const flash = (svg, label) => {
         btn.innerHTML = svg;
         btn.setAttribute('aria-label', label);
-        setTimeout(() => {
+        clearTimeout(reset);
+        reset = setTimeout(() => {
             btn.innerHTML = COPY_SVG;
             btn.setAttribute('aria-label', 'Copy message');
         }, 1200);
