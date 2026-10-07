@@ -610,7 +610,26 @@ header { display: none; }
 .noam-doc-row:disabled { cursor: not-allowed; }
 .noam-doc-row.noam-doc-disabled { opacity: 0.55; }
 .noam-doc-row.noam-doc-disabled:hover { background: var(--surface); color: var(--text-secondary); }
-.noam-doc-title { font-size: 0.85rem; color: var(--text-primary); word-break: break-word; }
+
+/* The grid ITEM is this wrapper, not the card button — the dustbin is its sibling (see
+   buildDocRow). Overlaying the card's top-right corner keeps the card's own click
+   target whole and keeps the row of status chips below undisturbed. */
+.noam-doc-card { position: relative; display: flex; }
+.noam-doc-card > .noam-doc-row { flex: 1; min-width: 0; }
+.noam-doc-delete {
+    position: absolute;
+    top: 0.3rem;
+    right: 0.3rem;
+    padding: 0.15rem;
+    opacity: 0.35;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+/* Always present (never hover-only: it has to be reachable on touch), but quiet until
+   the card is hovered and red only once the pointer is actually on it. */
+.noam-doc-card:hover .noam-doc-delete { opacity: 0.8; }
+.noam-doc-delete:hover,
+.noam-doc-delete:focus-visible { opacity: 1; color: #ef4444; }
+.noam-doc-title { font-size: 0.85rem; color: var(--text-primary); word-break: break-word; padding-right: 1.1rem; }
 .noam-doc-disabled .noam-doc-title { color: var(--text-secondary); }
 .noam-doc-date { font-size: 0.72rem; }
 
@@ -634,6 +653,9 @@ header { display: none; }
 /* ── T09: study-item list ────────────────────────────────────────────── */
 .noam-study-header { display: flex; align-items: center; gap: 0.5rem; }
 .noam-study-title { font-size: 0.95rem; font-weight: 600; color: var(--text-primary); word-break: break-word; }
+.noam-study-delete { flex-shrink: 0; opacity: 0.55; transition: opacity 0.15s ease, color 0.15s ease; }
+.noam-study-delete:hover,
+.noam-study-delete:focus-visible { opacity: 1; color: #ef4444; }
 .noam-study-toolbar { margin: 0.5rem 0; }
 .noam-study-list { display: flex; flex-direction: column; gap: 0.4rem; flex: 1; min-height: 0; overflow-y: auto; margin-bottom: 0.5rem; }
 .noam-study-spanish { flex: 1; font-weight: 600; color: var(--text-primary); }
@@ -680,6 +702,13 @@ header { display: none; }
 .noam-modal-error { font-size: 0.78rem; color: #ef4444; }
 .noam-modal-error[hidden] { display: none; }
 .noam-modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem; }
+
+/* ── Confirmation modal ──────────────────────────────────────────────── */
+.noam-confirm-modal { width: min(90vw, 400px); }
+.noam-confirm-message { font-size: 0.85rem; line-height: 1.5; color: var(--text-secondary); }
+.noam-confirm-danger { border-color: #ef4444; color: #ef4444; }
+.noam-confirm-danger:hover { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+.noam-confirm-danger:disabled { opacity: 0.6; cursor: default; }
 
 /* ── Tooltip helper ─────────────────────────────────────────── */
 [data-tooltip] { position: relative; }

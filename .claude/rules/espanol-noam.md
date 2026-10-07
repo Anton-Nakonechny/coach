@@ -78,7 +78,8 @@ before T17, system prompt included.
 a third Español mode that studies
 vocabulary from **noam**, a sibling vocabulary-platform repo (REST API at
 `http://localhost:8080/api/v1` in dev). Flow: the 文 screen (Documentos tab — noam's
-documents, plus upload; Cola tab — the profile's spaced-repetition study queue) →
+documents, plus upload and per-document delete; Cola tab — the profile's
+spaced-repetition study queue) →
 a per-document/per-queue study-item list with study/known/ignored triage → Proceed
 flushes the triage marks to noam, then seeds a 字 quiz straight from the checked
 items' own noam translations via `POST /api/spanish/words/seed` (no LLM call —
@@ -96,9 +97,27 @@ graded `/check` call posts one review per lexeme-bearing word to noam via
 there is swallowed per word (logged, not thrown), since the set is single-use and
 one failed post must not cost the grades of every word after it. Transport split:
 reads (documents, study-items, the study queue) go browser→noam directly against
-`coach.noam.base-url`; writes (lexeme-states, reviews) go browser→coach-web→noam
-through `noam/NoamGateway` so noam's `userId` never reaches the browser —
-`GET /api/noam/config` hands the client only `{baseUrl, profileId}`. Config:
+`coach.noam.base-url`; so do the two document writes that carry no `userId`
+(`POST /documents` upload, `DELETE /documents/{id}`). Only the writes that *could*
+leak noam's `userId` (lexeme-states, reviews) go browser→coach-web→noam through
+`noam/NoamGateway` so the id never reaches the browser —
+`GET /api/noam/config` hands the client only `{baseUrl, profileId}`.
+**Deleting a document** is offered twice, both routed through one
+`confirmDeleteDocument` → `openConfirmModal` → `deleteNoamDocument` chain: a dustbin
+overlaying each grid card's top-right corner, and one beside the title in a document's
+own study list. The grid card is itself a `<button>`, so the dustbin is a *sibling*
+inside a `.noam-doc-card` wrapper rather than a child — nested buttons are invalid HTML,
+and the card is `disabled` for every non-EXTRACTED document, which would swallow clicks
+aimed at a nested child; a FAILED or still-processing document is exactly the one worth
+dropping, so its dustbin stays live while its card stays dead. Nothing is sent before
+the modal is confirmed, and a rejected delete (noam answers **409 while the ingestion
+job is PENDING/RUNNING**, a routine outcome) leaves the modal up with the reason printed
+in it rather than closing, which would read as a delete that worked. Success is
+optimistic on the grid (drop the card, then reconcile with a silent refetch) and routes
+the study list back to the Documentos tab through the same teardown Back uses, so the
+triage marks made before the delete still flush — they are about lexemes, which outlive
+the document. The Cola tab passes no `onDelete` to `renderNoamItemList`: its list is the
+profile's queue, not a document. Config:
 `AppConfig.Noam` binds `coach.noam.base-url` / `profile-id` / `user-id`; both ids
 are hardcoded for v1, pending a `GET /profiles/{id}` lookup in noam. Degradation:
 if noam is unreachable (`GET /api/noam/config` fails, or the initial documents
@@ -159,6 +178,6 @@ noam-free paths; a test exercising T14–T17 behavior must
 `com.sun.net.httpserver.HttpServer`, mirroring `DocFetchGatewayTest`'s pattern.
 
 文 mode's Playwright specs are `noam-documents-flow.spec.js`, `noam-study-list.spec.js`,
-and `noam-word-source-cache.spec.js`. A change to `script.js` or `noam.js` is not
+`noam-word-source-cache.spec.js`, and `noam-document-delete.spec.js`. A change to `script.js` or `noam.js` is not
 verified until `npx playwright test` has been run, even if `mvn test` and
 `node --check` both pass.
