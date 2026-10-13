@@ -736,12 +736,49 @@ class ChatApiTest {
                 "output_config", Map.of("effort", "high")));
     }
 
+    @Test
+    void sonnet55SendsThinkingAndEffort() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "sonnet-5-5", "high", null));
+
+        GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(sent.modelId()).isEqualTo("claude-sonnet-5-5");
+        assertThat(sent.extraBody()).isEqualTo(Map.of(
+                "thinking", Map.of("type", "adaptive"),
+                "output_config", Map.of("effort", "high")));
+    }
+
+    @Test
+    void opus55SendsThinkingAndEffort() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "opus-5-5", "max", null));
+
+        GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(sent.modelId()).isEqualTo("claude-opus-5-5");
+        assertThat(sent.extraBody()).isEqualTo(Map.of(
+                "thinking", Map.of("type", "adaptive"),
+                "output_config", Map.of("effort", "max")));
+    }
+
+    @Test
+    void haiku55OmitsEffortAndThinking() {
+        queueText("ok");
+
+        postChat(chatBody("hi", "haiku-5-5", "high", null));
+
+        GatewayCall sent = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(sent.modelId()).isEqualTo("claude-haiku-5-5");
+        assertThat(sent.extraBody()).isEmpty();
+    }
+
     // ----------------------------------------------------------------------- //
     // Models endpoint
     // ----------------------------------------------------------------------- //
 
     @Test
-    void modelsEndpointListsFiveModels() {
+    void modelsEndpointListsEightModels() {
         JsonNode body = json(rest.getForEntity(url("/api/models"), String.class));
 
         List<String> keys = new java.util.ArrayList<>();
@@ -750,14 +787,21 @@ class ChatApiTest {
             keys.add(m.get("key").asText());
             effortSupport.put(m.get("key").asText(), m.get("supportsEffort").asBoolean());
         }
-        assertThat(keys).containsExactly("sonnet-4-6", "sonnet-5", "opus-4-8", "fable-5", "haiku-4-5");
+        assertThat(keys).containsExactly(
+                "sonnet-4-6", "sonnet-5", "sonnet-5-5",
+                "opus-4-8", "opus-5-5",
+                "fable-5",
+                "haiku-4-5", "haiku-5-5");
         assertThat(effortSupport.get("opus-4-8")).isTrue();
+        assertThat(effortSupport.get("sonnet-5-5")).isTrue();
+        assertThat(effortSupport.get("opus-5-5")).isTrue();
         assertThat(effortSupport.get("haiku-4-5")).isFalse();
+        assertThat(effortSupport.get("haiku-5-5")).isFalse();
 
         List<String> effortLevels = new java.util.ArrayList<>();
         body.get("effortLevels").forEach(n -> effortLevels.add(n.asText()));
         assertThat(effortLevels).containsExactly("low", "medium", "high", "max");
-        assertThat(body.get("defaultModel").asText()).isEqualTo("sonnet-4-6");
+        assertThat(body.get("defaultModel").asText()).isEqualTo("haiku-5-5");
     }
 
     @Test
@@ -783,6 +827,24 @@ class ChatApiTest {
         JsonNode haiku = byKey.get("haiku-4-5");
         assertThat(haiku.get("supportsEffort").asBoolean()).isFalse();
         assertThat(haiku.get("adaptiveThinking").asBoolean()).isFalse();
+
+        JsonNode sonnet55 = byKey.get("sonnet-5-5");
+        assertThat(sonnet55.get("id").asText()).isEqualTo("claude-sonnet-5-5");
+        assertThat(sonnet55.get("label").asText()).isEqualTo("Sonnet 5.5");
+        assertThat(sonnet55.get("supportsEffort").asBoolean()).isTrue();
+        assertThat(sonnet55.get("adaptiveThinking").asBoolean()).isTrue();
+
+        JsonNode opus55 = byKey.get("opus-5-5");
+        assertThat(opus55.get("id").asText()).isEqualTo("claude-opus-5-5");
+        assertThat(opus55.get("label").asText()).isEqualTo("Opus 5.5");
+        assertThat(opus55.get("supportsEffort").asBoolean()).isTrue();
+        assertThat(opus55.get("adaptiveThinking").asBoolean()).isTrue();
+
+        JsonNode haiku55 = byKey.get("haiku-5-5");
+        assertThat(haiku55.get("id").asText()).isEqualTo("claude-haiku-5-5");
+        assertThat(haiku55.get("label").asText()).isEqualTo("Haiku 5.5");
+        assertThat(haiku55.get("supportsEffort").asBoolean()).isFalse();
+        assertThat(haiku55.get("adaptiveThinking").asBoolean()).isFalse();
     }
 
     // ----------------------------------------------------------------------- //
@@ -1026,7 +1088,7 @@ class ChatApiTest {
         ResponseEntity<String> resp = rest.postForEntity(url("/api/chat"), body, String.class);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(json(resp).get("model").asText()).isEqualTo("sonnet-4-6");
+        assertThat(json(resp).get("model").asText()).isEqualTo("haiku-5-5");
     }
 
     @Test
