@@ -21,6 +21,7 @@
     --coach-accent: darkorange;
     --claude-accent: #eee2c7;
     --java-accent: #5382A1;
+    --system-design-accent: #D4DC74;
 }
 
 body {
@@ -269,6 +270,17 @@ header { display: none; }
 .conversation-item.java-chat.active {
     border-color: var(--java-accent);
     color: var(--java-accent);
+}
+
+/* System Design conversations: light yellow-green, matching the database-cylinder icon */
+.conversation-item.system-design-chat {
+    color: var(--system-design-accent);
+    border-color: rgba(212, 220, 116, 0.45);
+}
+.conversation-item.system-design-chat:hover,
+.conversation-item.system-design-chat.active {
+    border-color: var(--system-design-accent);
+    color: var(--system-design-accent);
 }
 
 .muted { font-size: 0.825rem; color: var(--text-secondary); font-style: italic; }
@@ -1065,6 +1077,16 @@ header { display: none; }
 .java-hint:hover, .java-reveal:hover { background: var(--surface-hover); }
 .java-hint:disabled, .java-reveal:disabled { cursor: default; opacity: 0.4; }
 .java-controls-row .next-question { border-color: var(--java-accent); color: var(--java-accent); margin-left: auto; }
+
+/* ── System Design coach: sidebar icon + Fundamentals drill button ──────── */
+.system-design-logo-icon {
+    display: inline-block;
+    vertical-align: -2px;
+    flex-shrink: 0;
+    margin-right: 6px;
+    color: var(--system-design-accent);
+}
+.drill-topic-button { grid-column: 1 / -1; text-align: center; border-color: var(--system-design-accent); color: var(--system-design-accent); }
 
 /* ── Offline draft + outbox ─────────────────────────────────── */
 

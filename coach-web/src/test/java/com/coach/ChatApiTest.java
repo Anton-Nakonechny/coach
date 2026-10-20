@@ -1615,6 +1615,247 @@ class ChatApiTest {
         assertThat(gatewayCalls).isEmpty();
     }
 
+    // ── System Design Interview Coach: case grid + Fundamentals drill ─────── //
+
+    private static final String DRILL = "Fundamentals drill";
+
+    private static Path systemDesignDir() {
+        return COACHES_DIR.resolve("System Design");
+    }
+
+    private static void writeSystemDesign(String name, String content) throws IOException {
+        var dir = systemDesignDir();
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve(name), content, UTF_8);
+    }
+
+    /** Case 01 + 02 plus the two shared references every System Design prompt appends. */
+    private static void writeSystemDesignSet() throws IOException {
+        writeSystemDesign("01 Scale from zero to millions of users.md", "SCALE_CASE_BODY");
+        writeSystemDesign("02 Rate limiter.md", "RATE_LIMITER_CASE_BODY");
+        writeSystemDesign("00 Concepts.md", "CONCEPTS_BODY");
+        writeSystemDesign("00 Numbers cheat sheet.md", "NUMBERS_BODY");
+    }
+
+    /** New-System-Design-chat body; topic omitted when null. */
+    private static Map<String, Object> systemDesignBody(String topic) {
+        Map<String, Object> body = chatBody("", "sonnet-4-6", null, null);
+        body.put("coachType", "system-design");
+        if (topic != null) body.put("topic", topic);
+        return body;
+    }
+
+    @Test
+    void systemDesignTopicsEndpointListsCasesSortedWithoutSharedFiles() throws IOException {
+        writeSystemDesign("02 Rate limiter.md", "content");
+        writeSystemDesign("01 Scale from zero to millions of users.md", "content");
+        writeSystemDesign("00 Concepts.md", "shared");
+        writeSystemDesign("00 Numbers cheat sheet.md", "shared");
+        writeSystemDesign("README.md", "index");
+
+        var resp = rest.getForEntity(url("/api/coaches/system-design/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = json(resp);
+        assertThat(body).hasSize(2);
+        assertThat(body.get(0).asText()).isEqualTo("Scale from zero to millions of users");
+        assertThat(body.get(1).asText()).isEqualTo("Rate limiter");
+    }
+
+    @Test
+    void systemDesignTopicsEndpointWithMissingDirReturns500() {
+        var resp = rest.getForEntity(url("/api/coaches/system-design/topics"), String.class);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(resp).get("message").asText()).contains("topics");
+    }
+
+    @Test
+    void systemDesignCaseStartsInterviewWithPersonaCaseAndSharedReferences() throws IOException {
+        writeSystemDesignSet();
+
+        var resp = postChat(systemDesignBody("Rate limiter"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).containsSubsequence(
+                "system design interviewer", "RATE_LIMITER_CASE_BODY", "CONCEPTS_BODY", "NUMBERS_BODY");
+        assertThat(call.system()).doesNotContain("SCALE_CASE_BODY");
+        assertThat(roles(call)).containsExactly("user");
+        assertThat(textOf(lastUserMessage())).isEqualTo("Start the interview.");
+
+        var cid = json(resp).get("conversationId").asText();
+        var history = rest.getForEntity(url("/api/conversations/" + cid), String.class);
+        assertThat(json(history).get(0).get("content").asText()).isEqualTo("Start the interview.");
+    }
+
+    @Test
+    void systemDesignCasePersistsPromptFileMetaSidecar() throws IOException {
+        writeSystemDesignSet();
+
+        var resp = postChat(systemDesignBody("Rate limiter"));
+
+        var meta = store.coachMeta(json(resp).get("conversationId").asText());
+        assertThat(meta).isPresent();
+        assertThat(meta.get().coachType().value()).isEqualTo("system-design");
+        assertThat(meta.get().promptFile()).isEqualTo("02 Rate limiter.md");
+        assertThat(meta.get().topic()).isNull();
+    }
+
+    @Test
+    void systemDesignConversationListItemShowsCasePreview() throws IOException {
+        writeSystemDesignSet();
+
+        postChat(systemDesignBody("Rate limiter"));
+
+        var item = json(rest.getForEntity(url("/api/conversations"), String.class)).get(0);
+        assertThat(item.get("preview").asText()).isEqualTo("System Design · Rate limiter");
+        assertThat(item.get("coachType").asText()).isEqualTo("system-design");
+    }
+
+    @Test
+    void systemDesignDrillUsesDrillPersonaAndSharedReferencesWithoutACase() throws IOException {
+        writeSystemDesignSet();
+
+        var resp = postChat(systemDesignBody(DRILL));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var call = gatewayCalls.get(gatewayCalls.size() - 1);
+        assertThat(call.system()).containsSubsequence("rapid-fire", "CONCEPTS_BODY", "NUMBERS_BODY");
+        assertThat(call.system()).doesNotContain("system design interviewer");
+        assertThat(call.system()).doesNotContain("SCALE_CASE_BODY").doesNotContain("RATE_LIMITER_CASE_BODY");
+        assertThat(call.system()).contains("Give me a hint.", "Reveal the answer.", "Next question.");
+        assertThat(textOf(lastUserMessage())).isEqualTo("Ask me the first drill question.");
+    }
+
+    @Test
+    void systemDesignDrillPersistsTopicOnlyMetaAndShowsPreview() throws IOException {
+        writeSystemDesignSet();
+
+        var resp = postChat(systemDesignBody(DRILL));
+
+        var cid = json(resp).get("conversationId").asText();
+        var meta = store.coachMeta(cid);
+        assertThat(meta).isPresent();
+        assertThat(meta.get().coachType().value()).isEqualTo("system-design");
+        assertThat(meta.get().promptFile()).isNull();
+        assertThat(meta.get().topic()).isEqualTo(DRILL);
+        var item = json(rest.getForEntity(url("/api/conversations"), String.class)).get(0);
+        assertThat(item.get("preview").asText()).isEqualTo("System Design · Fundamentals drill");
+    }
+
+    @Test
+    void systemDesignDrillFollowUpResendsSameSystemPrompt() throws IOException {
+        writeSystemDesignSet();
+        var cid = json(postChat(systemDesignBody(DRILL))).get("conversationId").asText();
+        var first = lastSystem();
+
+        postChat(chatBody("Next question.", "sonnet-4-6", null, cid));
+
+        assertThat(lastSystem()).isEqualTo(first);
+        assertThat(roles(gatewayCalls.get(gatewayCalls.size() - 1))).containsExactly("user", "assistant", "user");
+    }
+
+    @Test
+    void systemDesignFollowUpResendsSameSystemPromptAndAcceptsSketchImage() throws IOException {
+        writeSystemDesignSet();
+        var cid = json(postChat(systemDesignBody("Rate limiter"))).get("conversationId").asText();
+        var first = lastSystem();
+        byte[] png = {(byte) 0x89, 'P', 'N', 'G', 0, 0, 0, 1};
+
+        var resp = postChatMultipart(chatBody("Here is my sketch.", "sonnet-4-6", null, cid),
+                List.of(new PartFile("sketch.png", "image/png", png)));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(lastSystem()).isEqualTo(first);
+        assertThat(uploads).singleElement().satisfies(u -> assertThat(u.filename()).isEqualTo("sketch.png"));
+        assertThat(lastUserMessage().content()).containsExactly(
+                new TextBlock("Here is my sketch."),
+                new AttachmentBlock("file_test_0001", IMAGE_PNG, "sketch.png", AttachmentBlock.Kind.IMAGE));
+    }
+
+    @Test
+    void systemDesignChatWithoutTopicReturns400() throws IOException {
+        writeSystemDesignSet();
+
+        var resp = postChat(systemDesignBody(null));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("topic");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+        assertThat(gatewayCalls).isEmpty();
+    }
+
+    @Test
+    void systemDesignChatWithUnknownTopicReturns400() throws IOException {
+        writeSystemDesignSet();
+
+        var resp = postChat(systemDesignBody("No such case"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("No such case");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+    }
+
+    @Test
+    void systemDesignChatWithSharedReferenceAsTopicReturns400() throws IOException {
+        writeSystemDesignSet();
+
+        var resp = postChat(systemDesignBody("Concepts"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+    }
+
+    @Test
+    void systemDesignChatWithNonBlankMessageReturns400() throws IOException {
+        writeSystemDesignSet();
+        var body = systemDesignBody("Rate limiter");
+        body.put("message", "hi");
+
+        var resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("blank");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+    }
+
+    @Test
+    void systemDesignChatStartWithFilesReturns400() throws IOException {
+        writeSystemDesignSet();
+
+        var resp = postChatMultipart(systemDesignBody("Rate limiter"),
+                List.of(new PartFile("sketch.png", "image/png", new byte[]{1})));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("files");
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+        assertThat(uploads).isEmpty();
+    }
+
+    @Test
+    void systemDesignChatOnExistingConversationReturns400() throws IOException {
+        writeSystemDesignSet();
+        var body = systemDesignBody("Rate limiter");
+        body.put("conversationId", "existing123");
+
+        var resp = postChat(body);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(json(resp).get("message").asText()).contains("new chat");
+    }
+
+    @Test
+    void systemDesignChatWithMissingSharedReferenceReturns500AndPersistsNothing() throws IOException {
+        writeSystemDesign("02 Rate limiter.md", "RATE_LIMITER_CASE_BODY");
+
+        var resp = postChat(systemDesignBody("Rate limiter"));
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(CONV_DIR.toFile().list()).isEmpty();
+        assertThat(gatewayCalls).isEmpty();
+    }
+
     // ── Direct each new quiz's first question at a random topic bullet ── //
 
     private static final List<String> QUIZ_BULLETS = List.of(

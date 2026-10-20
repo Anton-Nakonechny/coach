@@ -171,6 +171,20 @@ see the fix.
   feedback recap isn't misread as a new question) populates the `question` field of
   `ChatResponse` and `MessageItem` (derived at read time, never persisted). The PDF
   exam guide is gitignored (`coaches/Claude/*.pdf`) and must never be committed.
+- **System Design coach** (`SYSTEM_DESIGN`, in `CoachService`) — a topic-grid coach like Java:
+  `GET /api/coaches/system-design/topics` returns the `coaches/System Design/NN *.md` case
+  names (prefix stripped, **`00 *` files excluded**); the UI adds 🎲 Random (cases only) and a
+  **Fundamentals drill** button. An interview chat stores `CoachMeta(SYSTEM_DESIGN, "NN Name.md",
+  null)` and its system prompt is `SYSTEM_DESIGN_PERSONA` + case file + the two shared
+  references `00 Concepts.md` / `00 Numbers cheat sheet.md`. The drill is **not a file**: the
+  reserved topic `"Fundamentals drill"` is stored as `CoachMeta(SYSTEM_DESIGN, null, "Fundamentals
+  drill")` (null `promptFile`), with `SYSTEM_DESIGN_DRILL_PERSONA` + the two references. Both need
+  the shared files, so `startSystemDesign` checks they exist *before* the sidecar is saved. The
+  interviewer decides when to give the verdict and the chat stays open afterwards; sketch images
+  ride on later turns through the normal attachment path. Client-side the drill reuses the Java
+  hint / reveal / next row, gated on `systemDesignDrills` (derived from the sidebar preview, since
+  interview and drill share the `system-design` slug) — interview chats never get the row.
+  The interviewer persona is hardcoded in Java; the case files contain no book/page references.
 - **`web/ChatController`** + `ApiExceptionHandler` — the REST route handlers (`/api/chat`
   has JSON + multipart overloads; the three 字/文 word routes — `translate`, `seed`,
   `check` — live on `SpanishWordController`, and the two noam routes —
