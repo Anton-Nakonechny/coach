@@ -96,9 +96,11 @@ public class ChatController {
         String message = request.message();
 
         if (StringUtils.hasText(request.topic())
-                && coach != CoachType.SPANISH && coach != CoachType.CLAUDE_ARCHITECT && coach != CoachType.JAVA)
+                && coach != CoachType.SPANISH && coach != CoachType.CLAUDE_ARCHITECT
+                && coach != CoachType.JAVA && coach != CoachType.SYSTEM_DESIGN)
             throw new InvalidRequestException(
-                    "topic can only be set for the Spanish tutor, the Claude Architect coach, or the Java coach");
+                    "topic can only be set for the Spanish tutor, the Claude Architect coach, "
+                            + "the Java coach, or the System Design coach");
         if (coach != CoachType.NONE && StringUtils.hasText(request.conversationId()))
             throw new InvalidRequestException("coachType can only be set when starting a new chat");
 
@@ -112,13 +114,14 @@ public class ChatController {
                 throw new InvalidRequestException("message must be blank when starting a coach chat");
             if (!files.isEmpty())
                 throw new InvalidRequestException("files are not allowed when starting a Claude Architect chat");
-        } else if (coach == CoachType.JAVA) {
+        } else if (coach == CoachType.JAVA || coach == CoachType.SYSTEM_DESIGN) {
             if (!StringUtils.hasText(request.topic()))
-                throw new InvalidRequestException("topic is required for the Java coach");
+                throw new InvalidRequestException("topic is required for the " + coach.shortLabel() + " coach");
             if (StringUtils.hasText(message))
                 throw new InvalidRequestException("message must be blank when starting a coach chat");
             if (!files.isEmpty())
-                throw new InvalidRequestException("files are not allowed when starting a Java coach chat");
+                throw new InvalidRequestException(
+                        "files are not allowed when starting a " + coach.shortLabel() + " coach chat");
         } else if (coach != CoachType.NONE) {
             if (StringUtils.hasText(message))
                 throw new InvalidRequestException("message must be blank when starting a coach chat");
@@ -148,6 +151,9 @@ public class ChatController {
         } else if (coach == CoachType.JAVA) {
             newMeta = coachService.startJava(request.topic().trim());
             message = coachService.javaOpeningInstruction(newMeta);
+        } else if (coach == CoachType.SYSTEM_DESIGN) {
+            newMeta = coachService.startSystemDesign(request.topic().trim());
+            message = coachService.systemDesignOpeningInstruction(newMeta);
         } else if (coach != CoachType.NONE) {
             newMeta = coachService.startCoach(coach);
         }
@@ -199,6 +205,11 @@ public class ChatController {
     @GetMapping("/coaches/java/topics")
     public List<String> javaTopics() {
         return coachService.javaTopics();
+    }
+
+    @GetMapping("/coaches/system-design/topics")
+    public List<String> systemDesignTopics() {
+        return coachService.systemDesignTopics();
     }
 
     @GetMapping("/models")

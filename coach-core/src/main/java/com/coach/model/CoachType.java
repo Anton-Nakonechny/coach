@@ -8,7 +8,8 @@ public enum CoachType {
     CHIEF_OPERATING_OFFICER("chief-operating-officer"),
     SPANISH("spanish"),
     CLAUDE_ARCHITECT("claude-architect"),
-    JAVA("java");
+    JAVA("java"),
+    SYSTEM_DESIGN("system-design");
 
     private final String value;
 
@@ -25,6 +26,7 @@ public enum CoachType {
             case SPANISH -> "Español";
             case CLAUDE_ARCHITECT -> "Claude";
             case JAVA -> "Java";
+            case SYSTEM_DESIGN -> "System Design";
         };
     }
 
